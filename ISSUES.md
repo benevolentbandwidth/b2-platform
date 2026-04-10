@@ -1,7 +1,4 @@
-# b2 Platform — All 18 MVP GitHub Issues
-# Complete descriptions ready to paste into GitHub Issues
-# ─────────────────────────────────────────────────────────────────────────────
-
+# b2 Platform — MVP GitHub Issues
 
 ## Issue #1 — Canonical Message Envelope
 **Labels:** `core` `good first issue`
