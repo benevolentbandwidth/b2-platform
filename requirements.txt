@@ -1,0 +1,6 @@
+# Dependencies will be added as components are built
+# See individual issues for component-specific requirements
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic-settings>=2.3.0
+pydantic>=2.8.0
