@@ -48,6 +48,7 @@ class CanonicalMessage:
     language_hint: str | None   # ISO 639-1, set by classifier
     location: LocationContext   # always present, confidence may be 0.0
     session_context: SessionContext
+    prior_context: str | None   # content from user's quoted/replied summary — user-held memory
     timestamp: datetime
     raw_message_id: str | None  # for deduplication only
 
@@ -56,7 +57,12 @@ class CanonicalMessage:
         """One-way hash. Rotates daily. Cannot be reversed."""
 
     def to_agent_prompt(self) -> str:
-        """Returns clean text for the LLM. Never includes session_id, channel, or coordinates."""
+        """
+        Returns clean text for the LLM.
+        Never includes session_id, channel name, or coordinates.
+        If prior_context is present, prepends it as 'Previous session context:'
+        so the LLM understands this is a continuation without any new storage.
+        """
 
 
 @dataclass
@@ -68,6 +74,7 @@ class CanonicalResponse:
     session_id: str
     location_used: bool
     follow_up_hint: str | None
+    is_session_summary: bool = False  # True when this is the auto-summary closing message
 ```
 
 ### Privacy contract (enforced in this file)
@@ -82,7 +89,10 @@ class CanonicalResponse:
 - [ ] `make_session_id()` is one-way sha256, rotates daily
 - [ ] Same user same day → same session_id. Same user next day → different session_id
 - [ ] `to_agent_prompt()` includes location context when confidence > 0.5, never includes coordinates
-- [ ] Unit tests: hash consistency within a day, hash rotation across days, prompt with/without location
+- [ ] `to_agent_prompt()` prepends `prior_context` as "Previous session context:" when present
+- [ ] `prior_context` is never written to any storage — in-memory only
+- [ ] `is_session_summary` flag exists on `CanonicalResponse`
+- [ ] Unit tests: hash consistency within a day, hash rotation across days, prompt with/without location, prompt with/without prior_context
 - [ ] Zero PII fields, zero coordinate fields in any log statement
 
 
@@ -751,6 +761,43 @@ elif msg_type == "location":
 ### Message types to handle
 text, audio (→ flag for STT), image (→ flag for VLM), document, location, video.
 
+### Prior context extraction (from quoted/replied messages)
+When a user replies to a message in WhatsApp, Meta includes the quoted content in the webhook payload.
+This is how session continuity works — the user replies to their auto-summary, b2 receives it as
+`prior_context`, and the conversation picks up naturally. No upload, no file, no friction.
+
+```python
+def _extract_prior_context(msg: dict) -> str | None:
+    """
+    Extract quoted message content when user replies to a previous b2 message.
+
+    Meta webhook includes context.quoted_message when user replies:
+    {
+      "type": "text",
+      "text": { "body": "What should I do next?" },
+      "context": {
+        "quoted_message": {
+          "body": "Session summary:\n• Nitrogen deficiency...",
+          "id": "wamid.xxx"
+        }
+      }
+    }
+    Only treat as prior_context if content looks like a b2 summary.
+    Ignore if user just replied to a casual message.
+    """
+    quoted_body = msg.get("context", {}).get("quoted_message", {}).get("body", "")
+    if not quoted_body:
+        return None
+    # Accept if it starts with known b2 summary markers
+    markers = ["Session summary", "Here's a summary", "•", "—", "To continue"]
+    if any(quoted_body.strip().startswith(m) for m in markers):
+        return quoted_body
+    return None
+```
+
+Set `envelope["prior_context"] = _extract_prior_context(msg)` in the message parser.
+`prior_context` is passed in-memory only — **never written to any storage**.
+
 ### Acceptance criteria
 - [ ] `GET /webhook/whatsapp` verifies token and echoes challenge
 - [ ] `POST /webhook/whatsapp` returns 200 in under 200ms
@@ -759,7 +806,10 @@ text, audio (→ flag for STT), image (→ flag for VLM), document, location, vi
 - [ ] WhatsApp location type populates `LocationContext` with `source: "device"`
 - [ ] `wa_id` hashed before any other processing — never in logs
 - [ ] `send_text()` delivers response and marks message as read
-- [ ] Unit tests: signature verify, each message type, send response
+- [ ] `prior_context` extracted when user replies to a b2 summary message
+- [ ] `prior_context` is `None` for fresh messages with no reply context
+- [ ] `prior_context` never written to any log or storage
+- [ ] Unit tests: signature verify, each message type, quoted message extraction, no-context case
 - [ ] Integration test: full round trip with test WhatsApp number
 
 
@@ -814,10 +864,11 @@ async def respond(...) -> CanonicalResponse:
             tool_results[tool_id] = result
 
     # 2. Pass everything to gateway — gateway builds the isolated prompt
+    # prior_context (from user's quoted summary reply) included when present
     response_text = await gateway.call(
         prompt=gateway.build_prompt(
             skill=agent,
-            message=message,
+            message=message,           # includes prior_context if user replied to summary
             tool_results=tool_results,
             session_history=session_history,
         ),
@@ -834,7 +885,67 @@ async def respond(...) -> CanonicalResponse:
         language=message.language_hint or "en",
         session_id=message.session_id,
         location_used=message.location.confidence > 0.5,
+        is_session_summary=False,
     )
+```
+
+### Auto-summary at session close
+
+When a session ends (TTL or max_turns), the session manager returns it to the worker, which
+calls `generate_summary()` before deletion. The summary is sent to the user as a final message.
+It lives in their WhatsApp. b2 deletes the session. When the user replies to the summary,
+`prior_context` is populated and the conversation continues — no friction, no upload, no file.
+
+```python
+async def generate_summary(
+    self,
+    agent: AgentDefinition,
+    session_history: list[dict],
+    gateway: LLMGateway,
+    adapter: LLMAdapter,
+    language: str,
+) -> str | None:
+    """Called when session ends. Returns None if auto_summary is false."""
+    if not agent.session.get("auto_summary", False):
+        return None
+
+    summary_text = await gateway.call(
+        prompt=gateway.build_summary_prompt(
+            skill=agent,
+            session_history=session_history,
+            language=language,
+        ),
+        adapter=adapter,
+    )
+
+    continuation_note = _localized_continuation_note(language)
+    return f"{summary_text}\n\n{continuation_note}"
+
+
+def _localized_continuation_note(lang: str) -> str:
+    notes = {
+        "en": "To continue this conversation later, reply to this message.",
+        "sw": "Ili kuendelea mazungumzo haya baadaye, jibu ujumbe huu.",
+        "fr": "Pour continuer cette conversation plus tard, répondez à ce message.",
+        "ha": "Don ci gaba da wannan tattaunawa daga baya, amsa wannan saƙo.",
+        "ar": "للمتابعة لاحقاً، قم بالرد على هذه الرسالة.",
+        "hi": "बाद में इस बातचीत को जारी रखने के लिए, इस संदेश का उत्तर दें।",
+        "pt": "Para continuar esta conversa mais tarde, responda a esta mensagem.",
+        "id": "Untuk melanjutkan percakapan ini nanti, balas pesan ini.",
+    }
+    return notes.get(lang, notes["en"])
+```
+
+### agent.yaml session config
+
+```yaml
+session:
+  timeout_minutes: 1440       # per-skill — platform maximum is 4320 (72 hours)
+  max_turns: 20
+  auto_summary: true          # send summary to user at session end
+  summary_instructions: >     # optional — override default
+    Summarize key findings, recommendations, and next steps.
+    5 bullets maximum. Plain language. No jargon.
 ```
 
 ### The runtime's contract with the gateway
@@ -850,9 +961,14 @@ The runtime passes facts to the gateway. The gateway decides what enters the pro
 - [ ] Runtime calls tools and passes results to gateway — does not build prompts
 - [ ] LLM adapter not directly accessible from runtime code
 - [ ] Location auto-injection works for tools that declare `auto_inject: true`
+- [ ] `prior_context` from `message.prior_context` passed to gateway when present
+- [ ] `generate_summary()` called when session ends and `auto_summary: true`
+- [ ] Summary appends localized continuation instruction in correct language for at minimum: en, sw, fr, ha, ar, hi, pt, id
+- [ ] Summary sent as final message with `is_session_summary=True`
+- [ ] `generate_summary()` returns `None` when `auto_summary: false` — no message sent
 - [ ] Channel formatting applied correctly for all 4 channels
 - [ ] Fallback response returned in detected language on any failure
-- [ ] Unit tests: tool resolution, gateway delegation, channel formatting for all 4 channels, fallback
+- [ ] Unit tests: tool resolution, prior_context flow, summary generation in 4+ languages, channel formatting
 
 
 ---
@@ -1102,18 +1218,20 @@ class MessageWorker:
 ---
 
 
-## Issue #15 — Ephemeral Session Manager
+## Issue #15 — Session Manager
 **Labels:** `core`
 **Depends on:** #1
-**Estimated effort:** 3–4 hours
+**Estimated effort:** 4–5 hours
 
 ### Summary
-Build the session manager — in-memory only, no persistence, session expires when conversation ends or times out. Per-skill timeout and max_turns from `agent.yaml`. When a session expires it is deleted from memory permanently — no recovery path.
+Build the session manager. Sessions are in-memory, per-skill in duration (declared in `agent.yaml`), with a platform ceiling of 72 hours. When a session ends — by TTL, max_turns, or explicit close — the manager signals the worker to generate an auto-summary before deletion. The summary goes to the user. The session is then deleted with no archive and no recovery path.
 
 ### What to build
 `app/core/session.py`
 
 ```python
+PLATFORM_MAX_TIMEOUT_MINUTES = 4320   # 72 hours — hard ceiling, no skill can exceed this
+
 @dataclass
 class Session:
     session_id: str
@@ -1121,34 +1239,88 @@ class Session:
     prior_skill: str | None
     history: list[dict]             # [{role, content}] — max 10 turns
     language: str
+    agent_id: str                   # which skill owns this session
+    auto_summary_sent: bool         # prevents double-send on cleanup retry
     created_at: datetime
     updated_at: datetime
 
     def add_turn(self, user_text: str, agent_response: str, skill_id: str) -> None
     def is_expired(self, timeout_minutes: int) -> bool
     def is_at_max_turns(self, max_turns: int) -> bool
+    def should_close(self, timeout_minutes: int, max_turns: int) -> tuple[bool, str]
+    # returns (should_close, reason) where reason is "ttl" | "max_turns" | "none"
     def get_history_for_llm(self, limit: int = 10) -> list[dict]
 
 
 class SessionManager:
+    PLATFORM_MAX_TIMEOUT_MINUTES = 4320   # 72 hours
+
     async def get_or_create(self, session_id: str) -> Session
     async def save(self, session: Session) -> None
     async def delete(self, session_id: str) -> None
-    async def cleanup_expired(self) -> int       # returns count deleted
+    async def cleanup_expired(self) -> list[Session]
+    # Returns sessions that need closing — caller sends summaries before deletion
+    # Does NOT delete yet — deletion happens after summary is sent
+```
+
+### Session timeout rules
+
+```
+Per-skill timeout declared in agent.yaml:
+  session.timeout_minutes: 60       ← farming (quick lookup, 1 hour)
+  session.timeout_minutes: 1440     ← health triage (24 hours)
+  session.timeout_minutes: 4320     ← legal aid (72 hours, platform max)
+
+Platform enforces:
+  effective_timeout = min(agent.session.timeout_minutes, PLATFORM_MAX_TIMEOUT_MINUTES)
+
+No skill can declare a timeout longer than 72 hours.
+The ceiling is enforced here in the session manager — not in yaml validation.
+```
+
+### Session close and auto-summary flow
+
+```
+Periodically: SessionManager.cleanup_expired() runs
+       ↓
+Returns list of sessions where is_expired() or is_at_max_turns()
+       ↓
+Worker receives closing sessions
+       ↓
+For each session where agent.auto_summary = true
+  AND auto_summary_sent = false:
+    → AgentRuntime.generate_summary()   (LLM call — plain language)
+    → ChannelSender.send_text()         (final message to user)
+    → session.auto_summary_sent = True  (mark to prevent double-send)
+       ↓
+SessionManager.delete(session_id) for each closing session
+       ↓
+Session gone. No archive. No recovery path.
+       ↓
+User has summary in their WhatsApp.
+When they reply to it, prior_context is restored automatically.
+b2 picks up the thread with no friction.
 ```
 
 ### Key design points
-- `is_expired()` and `is_at_max_turns()` take the skill's declared values as parameters — there is no global timeout config
+- `is_expired()` and `is_at_max_turns()` take skill-declared values — no global config
+- `effective_timeout = min(declared, 4320)` — ceiling enforced in session manager
 - History capped at 10 turns — oldest discarded when exceeded
-- `cleanup_expired()` runs periodically — deleted sessions are gone with no archive
+- `cleanup_expired()` returns sessions so caller can trigger summaries *before* deletion
+- `auto_summary_sent` flag prevents double-send if cleanup runs twice before delete completes
+- After summary confirmed sent, session is deleted — no archive, no recovery
 
 ### Acceptance criteria
 - [ ] Session created on first message, retrieved on subsequent turns
 - [ ] `is_expired()` respects per-skill timeout passed as parameter
 - [ ] `is_at_max_turns()` respects per-skill max_turns passed as parameter
+- [ ] `effective_timeout` capped at 4320 minutes regardless of agent.yaml value
+- [ ] `should_close()` returns correct reason ("ttl" | "max_turns" | "none")
 - [ ] History capped at 10 turns, oldest discarded
-- [ ] Expired sessions deleted from memory — not archived anywhere
-- [ ] Unit tests: create, retrieve, expire, max turns, history cap, cleanup
+- [ ] `cleanup_expired()` returns closing sessions — does not delete before caller summarizes
+- [ ] `auto_summary_sent` flag prevents double-send on retry
+- [ ] Deleted sessions are gone — not archived anywhere
+- [ ] Unit tests: create, retrieve, expire, max turns, history cap, 72hr ceiling enforcement, cleanup flow, double-send prevention
 
 
 ---

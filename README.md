@@ -50,6 +50,8 @@ User sends "My maize leaves are turning yellow" on WhatsApp from Kisumu, Kenya
     Gemini 1.5 Pro responds in Swahili with Kenya-specific farming advice
            ↓
 User receives hyperlocal expert advice. Nothing stored. LLM learned nothing.
+When session ends, b2 sends a plain-language summary. User holds their own memory.
+If they reply to that summary later, b2 picks up where it left off.
 ```
 
 ---
@@ -260,8 +262,12 @@ location_scope:
   countries: [KE]
 
 session:
-  timeout_minutes: 10
+  timeout_minutes: 10       # per-skill — platform maximum is 4320 (72 hours)
   max_turns: 8
+  auto_summary: true        # send plain-language summary to user at session end
+  summary_instructions: >   # optional — override default summary prompt
+    Summarize key findings, recommendations, and next steps.
+    5 bullets maximum. Plain language.
 
 persona:
   tone: warm, practical, uses Kenyan farming examples
@@ -338,7 +344,8 @@ Gemini 1.5 Pro understands and responds natively in 100+ languages. The intent c
 
 These are not aspirations. They are architectural constraints enforced in code:
 
-- **No conversation content is ever stored.** Session memory is in-process only. Gone when the conversation ends.
+- **No conversation content is ever stored beyond the active session.** Session memory is in-process only. Platform maximum is 72 hours — set per skill in `agent.yaml`. When a session ends, it is deleted with no archive and no recovery path.
+- **Users hold their own memory.** When a session closes, b2 automatically sends a plain-language summary to the user. The summary lives in their own WhatsApp chat — b2 does not keep it. If a user replies to that summary later, b2 reads it as context and continues the conversation. The user decides what to share. b2 never stores it.
 - **No PII is ever written.** Phone numbers are one-way hashed to session IDs on receipt. The raw identifier never leaves the channel adapter.
 - **No location is ever stored.** Location context lives in session memory only. Never written to logs, databases, or analytics.
 - **No user signal ever reaches the LLM.** All LLM calls flow through the b2 API Gateway. The model provider sees only b2 — never a user identity, session, or location.
@@ -364,7 +371,7 @@ These are not aspirations. They are architectural constraints enforced in code:
 | LLM (MVP) | Gemini 1.5 Pro via Vertex AI | 100+ languages, GCP-native |
 | LLM (adapters) | GPT-4o, Claude, LLaMA | Model-agnostic adapter interface |
 | Knowledge / RAG | Vertex AI Vector Search | Semantic retrieval |
-| Session state | In-memory only | Privacy: nothing persists |
+| Session state | In-memory only, max 72 hrs per skill | Privacy: nothing persists beyond TTL |
 | Compute | GCP Cloud Run | Serverless, scales to zero |
 | Language | Python 3.11 | FastAPI, async-first |
 
@@ -388,7 +395,7 @@ These are not aspirations. They are architectural constraints enforced in code:
 - [ ] `#12` Core tool: web_search
 - [ ] `#13` Farming skill agents (global + Kenya reference)
 - [ ] `#14` Pub/Sub async worker
-- [ ] `#15` Ephemeral session manager
+- [ ] `#15` Session manager (per-skill TTL up to 72hrs, auto-summary trigger on close)
 - [ ] `#16` NeMo Guardrails integration
 - [ ] `#17` Cloud Run deploy + GitHub Actions CI/CD
 - [ ] `#18` CONTRIBUTING.md + local dev guide
