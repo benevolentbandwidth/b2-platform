@@ -95,6 +95,7 @@ async def verify_death_certificate(ctx: Any) -> dict[str, Any]:
             contact_identifier=_contact_identifier(session_id),
             case_fields=submission.case_fields,
         )
+        # TODO : Figure out how to give a passback at this point to Session
         handed_off = await deliver_to_gl(payload, image_bytes, mime_type)
 
     logger.info(

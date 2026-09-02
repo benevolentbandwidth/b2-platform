@@ -4,6 +4,8 @@ from .router import AgentRouter, BelowThresholdError
 from .session import Session
 from tools import summary_tool
 
+from pydantic_ai.messages import ToolReturnPart 
+
 
 def chat_loop() -> None:
 	"""Run a simple terminal chat loop against the routed agent."""
@@ -50,8 +52,19 @@ def chat_loop() -> None:
 
 
 		print("Agent: ", end="", flush=True)
+
 		for chunk in active_session.send_stream(query):
 			print(chunk, end="", flush=True)
+
+		
+		for message in reversed(active_session._history):
+			for part in message.parts:
+				if isinstance(part, ToolReturnPart) and part.tool_name == "death_certificate_verification":
+					if part.content.get("band") in {"high", "medium"}:
+						return_message = summary_tool.handle(active_session._history)
+						print("Agent: " + return_message)
+						print("Goodbye.")
+						break
 		print()
 
 
