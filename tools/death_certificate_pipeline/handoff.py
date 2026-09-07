@@ -7,6 +7,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -107,9 +108,7 @@ async def deliver_to_gl(
     try:
         token = await asyncio.to_thread(_get_access_token)
 
-        contact = str(payload.get("contact_identifier") or "unlinked")[:16]
-        submitted_at = str(payload.get("submitted_at") or "").replace(":", "-")
-        stem = f"death-certificate-{contact}-{submitted_at}"
+        stem = f"death-certificate-{uuid4()}"
         extension = _IMAGE_EXTENSIONS.get(image_mime_type, ".bin")
         upload_mime_type = (
             image_mime_type if image_mime_type in _IMAGE_EXTENSIONS else "application/octet-stream"

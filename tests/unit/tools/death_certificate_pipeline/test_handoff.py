@@ -15,6 +15,11 @@ async def test_uploads_json_and_original_image(monkeypatch):
     monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "give-light-folder")
 
     monkeypatch.setattr(handoff, "_get_access_token", lambda: "drive-token")
+    monkeypatch.setattr(
+        handoff,
+        "uuid4",
+        lambda: "12345678-1234-5678-1234-567812345678",
+    )
 
     requests = []
 
@@ -59,6 +64,12 @@ async def test_uploads_json_and_original_image(monkeypatch):
         contents.append(remainder.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0])
 
     json_name, image_name = metadata[0]["name"], metadata[1]["name"]
+    assert json_name == "death-certificate-12345678-1234-5678-1234-567812345678.json"
+    assert image_name == "death-certificate-12345678-1234-5678-1234-567812345678.jpg"
+    assert "aaaaaaaaaaaaaaaa" not in json_name
+    assert "aaaaaaaaaaaaaaaa" not in image_name
+    assert "2026-08-07" not in json_name
+    assert "2026-08-07" not in image_name
     assert json_name.removesuffix(".json") == image_name.removesuffix(".jpg")
     assert metadata[0]["parents"] == metadata[1]["parents"] == ["give-light-folder"]
     assert metadata[0]["mimeType"] == "application/json"
