@@ -1,10 +1,8 @@
 import asyncio
 import io
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from tools.fake_image_detector.checks.cnn_deepfake_check import CNNDeepfakeCheck

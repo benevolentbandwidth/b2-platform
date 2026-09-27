@@ -186,6 +186,7 @@ async def test_message_status_update_returns_null(monkeypatch):
     import src.api as api_module
     monkeypatch.setenv("WEBHOOK_SECRET", "")
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
 
     def fake_chat(**kwargs):
         return "should not be called"
@@ -200,6 +201,7 @@ async def test_message_image_download_unavailable_returns_null(monkeypatch):
     """If media can't be downloaded (e.g. no WHATSAPP_TOKEN), respond with null."""
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
     monkeypatch.setattr(api_module, "chat", lambda **kw: "should not be called")
 
     async def fake_download(media_id):
@@ -215,6 +217,7 @@ async def test_message_image_downloads_and_calls_chat(monkeypatch):
     """A downloadable image is fetched and routed to chat as image_bytes."""
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
 
     captured = {}
 
@@ -244,6 +247,7 @@ async def test_message_image_downloads_and_calls_chat(monkeypatch):
 async def test_message_text_calls_chat(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
 
     captured = {}
 
@@ -265,6 +269,7 @@ async def test_message_text_calls_chat(monkeypatch):
 async def test_message_text_debug_requires_env_and_header(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
     monkeypatch.setattr(api_module, "_ENABLE_E2E_DEBUG", "true")
 
     captured = {}
@@ -285,6 +290,7 @@ async def test_message_text_debug_requires_env_and_header(monkeypatch):
 async def test_message_text_debug_header_without_env_returns_normal_response(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
     monkeypatch.setattr(api_module, "_ENABLE_E2E_DEBUG", "")
 
     def fake_chat(*, text, session_id, debug_events=None, **kwargs):
@@ -305,6 +311,8 @@ async def test_message_text_debug_header_without_env_returns_normal_response(mon
 async def test_message_text_sends_summary_tool_response_as_second_message(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+    monkeypatch.setattr(api_module, "_SEND_SUMMARY_MESSAGE", "true")
 
     captured = {}
 
@@ -356,6 +364,7 @@ async def test_message_text_sends_summary_tool_response_as_second_message(monkey
 async def test_message_text_skips_summary_when_outbound_is_not_configured(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
 
     called = {"summary": False}
 
@@ -380,6 +389,7 @@ async def test_message_text_skips_summary_when_outbound_is_not_configured(monkey
 async def test_message_text_keeps_original_response_when_summary_generation_fails(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
 
     sent = {"called": False}
 
@@ -408,6 +418,7 @@ async def test_message_text_keeps_original_response_when_summary_generation_fail
 async def test_message_text_debug_returns_tool_results(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
     monkeypatch.setattr(api_module, "_ENABLE_E2E_DEBUG", "yes")
 
     def fake_chat(*, text, session_id, debug_events=None, **kwargs):
@@ -496,3 +507,73 @@ async def test_message_correct_secret_passes(monkeypatch):
         x_webhook_secret="mysecret",
     )
     assert response["response"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# /message — fail-closed auth, turn failure fallback, summary send gate
+# ---------------------------------------------------------------------------
+
+async def test_message_unset_secret_refuses_with_503(monkeypatch):
+    """An unconfigured secret must refuse the request, not accept it."""
+    import src.api as api_module
+    monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "")
+
+    try:
+        await api_module.message_endpoint(FakeRequest(SAMPLE_TEXT_PAYLOAD))
+    except api_module.HTTPException as exc:
+        assert exc.status_code == 503
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+async def test_message_chat_failure_returns_fallback_not_500(monkeypatch):
+    import src.api as api_module
+    monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+
+    def boom(**kwargs):
+        raise RuntimeError("firestore unavailable")
+
+    monkeypatch.setattr(api_module, "chat", boom)
+    monkeypatch.setattr(api_module, "run_in_threadpool", _run_direct)
+    monkeypatch.setattr(api_module, "generate_summary_tool_response", _no_summary)
+
+    response = await api_module.message_endpoint(FakeRequest(SAMPLE_TEXT_PAYLOAD))
+
+    assert response["response"] == api_module.FALLBACK_RESPONSE
+
+
+async def test_message_unroutable_query_returns_guidance(monkeypatch):
+    import src.api as api_module
+    monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+
+    def below_threshold(**kwargs):
+        raise api_module.BelowThresholdError(0.1, 0.35)
+
+    monkeypatch.setattr(api_module, "chat", below_threshold)
+    monkeypatch.setattr(api_module, "run_in_threadpool", _run_direct)
+    monkeypatch.setattr(api_module, "generate_summary_tool_response", _no_summary)
+
+    response = await api_module.message_endpoint(FakeRequest(SAMPLE_TEXT_PAYLOAD))
+
+    assert response["response"] == api_module.UNROUTABLE_RESPONSE
+
+
+async def test_message_does_not_send_summary_when_gate_is_off(monkeypatch):
+    """The caller delivers the response; b2 stays silent unless explicitly enabled."""
+    import src.api as api_module
+    monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+    monkeypatch.setattr(api_module, "_SEND_SUMMARY_MESSAGE", "")
+
+    sent = []
+    monkeypatch.setattr(api_module, "chat", lambda *, text, **kw: "ok")
+    monkeypatch.setattr(api_module, "run_in_threadpool", _run_direct)
+    monkeypatch.setattr(api_module, "can_send_text_message", lambda **kw: sent.append("checked") or True)
+
+    response = await api_module.message_endpoint(FakeRequest(SAMPLE_TEXT_PAYLOAD))
+
+    assert response["response"] == "ok"
+    assert sent == []

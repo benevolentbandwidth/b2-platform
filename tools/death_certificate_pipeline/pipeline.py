@@ -65,9 +65,7 @@ _IMAGE_MAGIC: list[tuple[bytes, int, str]] = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Stage 1: document — validate image format, determine legibility
-# ---------------------------------------------------------------------------
 
 async def _stage_document(submission: Submission) -> DocumentSignal:
     """Validate the image and detect its format from magic bytes.
@@ -103,9 +101,7 @@ async def _stage_document(submission: Submission) -> DocumentSignal:
     )
 
 
-# ---------------------------------------------------------------------------
 # Stage 2: authenticity — fake image detector
-# ---------------------------------------------------------------------------
 
 async def _stage_authenticity(submission: Submission) -> AuthenticitySignal:
     """Run the fake image detector against the certificate image.
@@ -133,9 +129,7 @@ async def _stage_authenticity(submission: Submission) -> AuthenticitySignal:
     return AuthenticitySignal(result=result)
 
 
-# ---------------------------------------------------------------------------
 # Stage 3: consistency — Gemini certificate extraction + narrative scoring
-# ---------------------------------------------------------------------------
 
 async def _stage_consistency(submission: Submission) -> ConsistencySignal:
     """Extract certificate facts with Gemini and score them against the narrative.
@@ -196,9 +190,7 @@ async def _stage_consistency(submission: Submission) -> ConsistencySignal:
     )
 
 
-# ---------------------------------------------------------------------------
 # Stage 4: score — combine signals into a ReliabilityResult
-# ---------------------------------------------------------------------------
 
 async def _stage_score(
     doc:  DocumentSignal,
@@ -264,9 +256,7 @@ async def _stage_score(
     )
 
 
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 async def run_pipeline_with_diagnostics(submission: Submission) -> PipelineExecution:
     """Run the pipeline and retain its authenticity result for E2E diagnostics."""

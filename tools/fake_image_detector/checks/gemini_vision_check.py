@@ -8,7 +8,6 @@ import re
 from tools.fake_image_detector.checks.base_check import BaseCheck
 from tools.fake_image_detector.models import (
     CheckResult,
-    GL9_FLAG_AGE_INCONSISTENCY,
     GL9_FLAG_EDITING_ARTIFACTS,
     GL9_FLAG_FOUND_ONLINE,
     GL9_FLAG_POSSIBLE_STOCK,

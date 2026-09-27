@@ -6,9 +6,10 @@ into bytes is a two-step authenticated call:
   1. GET /{media-id}                 → JSON with a short-lived, authenticated URL
   2. GET <that url>                  → the media bytes
 
-Both require a WhatsApp access token (``WHATSAPP_TOKEN``). If the token is not
-configured the function logs and returns None so the caller can degrade
-gracefully rather than crash — this is the one external dependency to provision.
+Both require a WhatsApp access token: ``WHATSAPP_TOKEN`` env var if set, else the
+``WHATSAPP_ACCESS_TOKEN`` secret in the benevolent-bandwidth project (see
+gcp_secrets.resolve). If neither resolves, the function logs and returns None
+so the caller can degrade gracefully rather than crash.
 
 This module is intentionally the single seam for media retrieval: if the upstream
 webhook is later changed to pre-resolve media to bytes/URL, only this file and the
@@ -22,6 +23,8 @@ import os
 
 import httpx
 
+from .gcp_secrets import resolve as resolve_secret
+
 logger = logging.getLogger(__name__)
 
 _GRAPH_BASE = "https://graph.facebook.com"
@@ -31,9 +34,9 @@ _TIMEOUT = 30.0
 
 async def download_media(media_id: str) -> tuple[bytes, str] | None:
     """Return (bytes, mime_type) for a WhatsApp media ID, or None if unavailable."""
-    token = os.getenv("WHATSAPP_TOKEN", "")
+    token = resolve_secret("WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN")
     if not token:
-        logger.warning("whatsapp_media.download skipped — WHATSAPP_TOKEN not set")
+        logger.warning("whatsapp_media.download skipped — no WhatsApp access token available")
         return None
     if not media_id:
         return None

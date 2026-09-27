@@ -26,6 +26,8 @@ IMAGE_ROUTING_TEXT = "A WhatsApp user uploaded a document image such as a death 
 # Text notice given to the model when an image arrives. The image bytes go to the
 # transient store (for tools to pull), never into the model's prompt.
 IMAGE_ARRIVED_PROMPT = "The user has just uploaded a document image."
+# Tail of prior conversation kept alongside IMAGE_ROUTING_TEXT when routing an image turn.
+IMAGE_ROUTING_HISTORY_CHARS = 400
 
 _router: AgentRouter | None = None
 
@@ -124,7 +126,7 @@ def _prepare_turn(
             raise ValueError("image_bytes must not be empty")
         if store is not None and session_id is not None:
             store.save_media(session_id, image_bytes, mime_type=image_media_type)
-        return IMAGE_ARRIVED_PROMPT, (history_text or IMAGE_ROUTING_TEXT)
+        return IMAGE_ARRIVED_PROMPT, _image_route_query(history_text)
 
     if text is not None:
         prompt = _build_prompt(text=text, image_bytes=None, image_url=None, image_media_type=image_media_type)
@@ -133,6 +135,18 @@ def _prepare_turn(
     # image_url — legacy path: the referenced image is passed to the model directly.
     prompt = _build_prompt(text=None, image_bytes=None, image_url=image_url, image_media_type=image_media_type)
     return prompt, IMAGE_ROUTING_TEXT
+
+
+def _image_route_query(history_text: str) -> str:
+    """Build the routing query for an image turn.
+
+    Always leads with the document-verification signal so an image reaches the
+    verification agent even when prior small talk dominates the history. Only
+    the tail of the history is kept, to stop a long chat diluting that signal.
+    """
+    if not history_text:
+        return IMAGE_ROUTING_TEXT
+    return f"{IMAGE_ROUTING_TEXT}\n{history_text[-IMAGE_ROUTING_HISTORY_CHARS:]}"
 
 
 def _build_prompt(

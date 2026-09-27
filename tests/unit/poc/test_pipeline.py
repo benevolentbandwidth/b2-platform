@@ -19,11 +19,9 @@ Mocking strategy:
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

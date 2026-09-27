@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -897,8 +896,7 @@ class TestBlock4Sweeper:
         self, tmp_path: Path, rsa_keypair
     ) -> None:
         from tools.privacy import (
-            PiiBundleStore, StubPiiDeliveryChannel, run_sweeper,
-            SessionRegistry, SessionState, EncryptedPiiBuffer,
+            PiiBundleStore, StubPiiDeliveryChannel, SessionRegistry, EncryptedPiiBuffer,
         )
         from datetime import timedelta
         _, pub = rsa_keypair

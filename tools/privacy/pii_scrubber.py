@@ -28,7 +28,7 @@ import uuid
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
@@ -48,10 +48,8 @@ _DEFAULT_CONFIG_PATH = Path(__file__).parent / "pii_config.yaml"
 _SCHEMA_VERSION = 1
 
 
-# ---------------------------------------------------------------------------
 # BLOCK-2: Crypto helpers (AES-256-GCM + RSA-OAEP)
 # B2 encrypts with GL's public key — only GL can decrypt with their private key.
-# ---------------------------------------------------------------------------
 
 def load_public_key(pem_path: str | Path) -> Any:
     return serialization.load_pem_public_key(Path(pem_path).read_bytes())
@@ -86,9 +84,7 @@ def decrypt_audit_entry(line: str, private_key: Any) -> dict[str, Any]:
     return json.loads(AESGCM(aes_key).decrypt(base64.b64decode(p["n"]), base64.b64decode(p["c"]), None))
 
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class EntityConfig:
@@ -169,9 +165,7 @@ class PiiConfig:
         )
 
 
-# ---------------------------------------------------------------------------
 # Data types
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class PiiEntity:
@@ -206,18 +200,14 @@ class ScrubResult:
         return bool(self.entities)
 
 
-# ---------------------------------------------------------------------------
 # BLOCK-1: Contact identifier
-# ---------------------------------------------------------------------------
 
 def _make_contact_identifier(channel_user_id: str, secret: str) -> str:
     """HMAC-SHA256(channel_user_id, secret) → stable 64-char hex. Not reversible."""
     return _hmac.new(secret.encode(), channel_user_id.encode(), "sha256").hexdigest()
 
 
-# ---------------------------------------------------------------------------
 # Audit store
-# ---------------------------------------------------------------------------
 
 @dataclass
 class _AuditEntry:
@@ -345,9 +335,7 @@ class PiiAuditStore:
             self._day = today
 
 
-# ---------------------------------------------------------------------------
 # Scrubber
-# ---------------------------------------------------------------------------
 
 class _FailureKind:
     ENCODING         = "encoding"
@@ -519,9 +507,7 @@ class PiiScrubber:
         return v.encode("utf-8", errors="replace").decode("utf-8")
 
 
-# ---------------------------------------------------------------------------
 # BLOCK-3: In-memory PII buffer per conversation
-# ---------------------------------------------------------------------------
 
 class EncryptedPiiBuffer:
     """Thread-safe in-memory PII buffer. Flushed to encrypted disk on session close."""
@@ -551,9 +537,7 @@ class EncryptedPiiBuffer:
         return list(self._buffers.keys())
 
 
-# ---------------------------------------------------------------------------
 # BLOCK-3: Session state machine
-# ---------------------------------------------------------------------------
 
 class SessionState(StrEnum):
     ACTIVE   = "active"
@@ -640,9 +624,7 @@ class SessionRegistry:
         return [e for e in self._sessions.values() if e.state == SessionState.FAILED]
 
 
-# ---------------------------------------------------------------------------
 # BLOCK-4: Lifecycle — disk persistence across restarts
-# ---------------------------------------------------------------------------
 
 class PiiDeliveryChannel(ABC):
     @abstractmethod

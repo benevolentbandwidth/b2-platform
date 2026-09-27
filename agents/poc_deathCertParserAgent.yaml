@@ -23,8 +23,6 @@ system_prompt: |
   Only after the tool returns do you write your reply, and it must reflect the tool's outcome: if it was forwarded, reassure
   them their request is now with GiveLight; if it needs review or a clearer image, gently explain the next step.
 
-skills:
-  # TBD
 tools:
   - death_certificate_verification
 

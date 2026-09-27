@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from src.embeddings import GoogleEmbedder, _DEFAULT_DIM, _DEFAULT_MODEL
 

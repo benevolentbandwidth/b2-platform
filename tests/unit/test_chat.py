@@ -250,3 +250,28 @@ def test_chat_image_turn_stores_media_and_hides_image_from_model(monkeypatch) ->
     assert captured["deps"].session_id == "wa-1"
     assert captured["deps"].store is not None
     assert "my mother passed away" in captured["deps"].history_text
+
+
+def test_image_route_query_keeps_document_signal_when_history_is_small_talk() -> None:
+    """Prior chatter must not steer an image turn away from the verification agent."""
+    from src.chat import IMAGE_ROUTING_TEXT, _image_route_query
+
+    query = _image_route_query("user: hello\nassistant: Hi! How can I help you today?")
+
+    assert query.startswith(IMAGE_ROUTING_TEXT)
+    assert "hello" in query
+
+
+def test_image_route_query_trims_long_history() -> None:
+    from src.chat import IMAGE_ROUTING_HISTORY_CHARS, IMAGE_ROUTING_TEXT, _image_route_query
+
+    query = _image_route_query("x" * 5000)
+
+    assert query.startswith(IMAGE_ROUTING_TEXT)
+    assert len(query) == len(IMAGE_ROUTING_TEXT) + 1 + IMAGE_ROUTING_HISTORY_CHARS
+
+
+def test_image_route_query_without_history_uses_document_signal() -> None:
+    from src.chat import IMAGE_ROUTING_TEXT, _image_route_query
+
+    assert _image_route_query("") == IMAGE_ROUTING_TEXT

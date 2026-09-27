@@ -17,7 +17,6 @@ os.environ.setdefault("PYTHON_DOTENV_DISABLED", "1")
 from e2e.cases import discover_cases
 from e2e.local_app import start_local_server, wait_for_health
 from e2e.reports import write_reports
-from e2e.runner import run_all
 
 DEFAULT_CASES_ROOT = "e2e_cases"
 DEFAULT_OUT_DIR = "e2e_runs"

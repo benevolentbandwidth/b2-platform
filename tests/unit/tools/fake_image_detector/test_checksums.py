@@ -1,5 +1,3 @@
-import pytest
-
 from tools.fake_image_detector.checks.checksums import validate_iban, validate_luhn, validate_mrz_digit
 
 

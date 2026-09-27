@@ -11,11 +11,11 @@ __pycache__/
 venv/
 dist/
 build/
-docs/
 
 # GCP credentials
 *.json
 !e2e_cases/**/*.json
+!deploy/cloud_run_config.json
 service-account*.json
 
 # IDE
@@ -43,12 +43,6 @@ dummy/
 tools/fake_image_detector/local_samples/
 tools/fake_image_detector/models/
 tests/fixtures/dataset/
-
-# Docker
-Dockerfile
-Dockerfile*
-Docker*
-
 
 # Scripts
 run_live_gemini_test_plan*

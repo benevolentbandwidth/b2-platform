@@ -19,5 +19,3 @@ provider:
   model: gemini-2.5-flash
   settings:
     thinking_budget: 0
-
-behavior:

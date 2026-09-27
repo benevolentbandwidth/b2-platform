@@ -1,7 +1,7 @@
 import asyncio
 import io
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from PIL import Image
 
@@ -90,7 +90,7 @@ class TestOCRDocumentCheckDetection:
         _install_mock_tesseract("IDENTITY CARD\nNational ID Number: 12345678")
         context: dict = {}
         try:
-            result = run(OCRDocumentCheck().run(_jpeg_bytes(), context))
+            run(OCRDocumentCheck().run(_jpeg_bytes(), context))
         finally:
             _remove_mock_tesseract()
 
@@ -100,7 +100,7 @@ class TestOCRDocumentCheckDetection:
         _install_mock_tesseract("Bank Statement\nIBAN: DE89370400440532013000")
         context: dict = {}
         try:
-            result = run(OCRDocumentCheck().run(_jpeg_bytes(), context))
+            run(OCRDocumentCheck().run(_jpeg_bytes(), context))
         finally:
             _remove_mock_tesseract()
 

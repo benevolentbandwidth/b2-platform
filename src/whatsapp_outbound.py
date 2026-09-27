@@ -5,6 +5,8 @@ import os
 
 import httpx
 
+from .gcp_secrets import resolve as resolve_secret
+
 logger = logging.getLogger(__name__)
 
 _GRAPH_BASE = "https://graph.facebook.com"
@@ -20,10 +22,10 @@ def can_send_text_message(*, wa_id: str | None, phone_number_id: str | None = No
     if outbound_disabled():
         logger.info("whatsapp_outbound.send skipped disabled=true")
         return False
-    if not os.getenv("WHATSAPP_TOKEN", ""):
-        logger.warning("whatsapp_outbound.send skipped missing WHATSAPP_TOKEN")
+    if not resolve_secret("WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN"):
+        logger.warning("whatsapp_outbound.send skipped — no WhatsApp access token available")
         return False
-    if not (phone_number_id or os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")):
+    if not (phone_number_id or resolve_secret("WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID")):
         logger.warning("whatsapp_outbound.send skipped missing phone_number_id")
         return False
     if not wa_id:
@@ -46,8 +48,8 @@ async def send_text_message(
         logger.warning("whatsapp_outbound.send skipped empty text")
         return False
 
-    token = os.getenv("WHATSAPP_TOKEN", "")
-    sender_id = phone_number_id or os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+    token = resolve_secret("WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN")
+    sender_id = phone_number_id or resolve_secret("WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID")
     version = os.getenv("WHATSAPP_GRAPH_VERSION", _DEFAULT_GRAPH_VERSION)
     url = f"{_GRAPH_BASE}/{version}/{sender_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}

@@ -1,0 +1,60 @@
+# Cloud Build config for the b2-whatsapp-adapter Cloud Run deploy pipeline.
+#
+# Mirrors the steps Google's "Continuously deploy from a repository" wizard
+# generated inline on the existing triggers, with one addition: a Verify step
+# that runs first and fails the build if the service is missing required
+# config, before spending time on a build that would deploy into it anyway.
+#
+# To use this instead of a trigger's inline steps: Cloud Build console ->
+# Triggers -> edit the trigger -> Configuration -> "Cloud Build configuration
+# file" -> cloudbuild.yaml. The trigger's existing substitution variables
+# (_SERVICE_NAME, _DEPLOY_REGION, _AR_HOSTNAME, _AR_PROJECT_ID, _AR_REPOSITORY,
+# _TRIGGER_ID) carry over unchanged; nothing else to reconfigure.
+
+steps:
+  - id: Verify
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: python3
+    args:
+      - scripts/verify_cloud_run_config.py
+      - --service=$_SERVICE_NAME
+      - --region=$_DEPLOY_REGION
+      - --project=$PROJECT_ID
+
+  - id: Build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --no-cache
+      - -t
+      - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - .
+      - -f
+      - Dockerfile
+
+  - id: Push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+
+  - id: Deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - $_SERVICE_NAME
+      - --platform=managed
+      - --image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - --labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID
+      - --region=$_DEPLOY_REGION
+      - --quiet
+
+images:
+  - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+
+options:
+  substitutionOption: ALLOW_LOOSE
+  logging: CLOUD_LOGGING_ONLY

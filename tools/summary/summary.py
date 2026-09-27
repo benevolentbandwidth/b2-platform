@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
 
-from app.core.pii import PiiScrubber, PiiAuditStore
+from tools.privacy.pii_scrubber import PiiScrubber, PiiAuditStore
 
 
 class ConversationSummaryTool:
