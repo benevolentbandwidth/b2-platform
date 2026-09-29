@@ -61,7 +61,7 @@ def chat_loop() -> None:
 			for part in message.parts:
 				if isinstance(part, ToolReturnPart) and part.tool_name == "death_certificate_verification":
 					if part.content.get("band") in {"high", "medium"}:
-						return_message = summary_tool.handle(active_session._history)
+						return_message = summary_tool.handle(active_session._history, active_session._deps.session_id)
 						print("Agent: " + return_message)
 						print("Goodbye.")
 						break

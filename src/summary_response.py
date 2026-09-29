@@ -25,10 +25,11 @@ async def generate_summary_tool_response(
     *,
     final_response: str,
     tool_events: list[dict[str, Any]] | None = None,
+    session_id: str
 ) -> str | None:
     try:
         messages = build_summary_messages(final_response=final_response, tool_events=tool_events or [])
-        return await call_summary_tool(messages)
+        return await call_summary_tool(messages, session_id)
     except Exception as exc:
         logger.warning("summary_response.generate skipped error=%s", exc)
         return None
