@@ -168,7 +168,7 @@ async def message_endpoint(
             debug_events=debug_events,
         )
         logger.info("api.message done wa_id=%s response_chars=%d", message.wa_id, len(response))
-        await _send_summary_tool_response(message, response, debug_events)
+        await _send_summary_tool_response(message, message.wa_id, response, debug_events)
         if debug_enabled:
             return _debug_response(response, message, debug_events or [])
         return {"response": response}
@@ -189,7 +189,7 @@ async def message_endpoint(
             debug_events=debug_events,
         )
         logger.info("api.message done wa_id=%s response_chars=%d", message.wa_id, len(response))
-        await _send_summary_tool_response(message, response, debug_events)
+        await _send_summary_tool_response(message, message.wa_id, response, debug_events)
         if debug_enabled:
             return _debug_response(response, message, debug_events or [])
         return {"response": response}
@@ -207,6 +207,7 @@ def health() -> dict[str, str]:
 
 async def _send_summary_tool_response(
     message: InboundMessage,
+    session_id: str,
     response: str,
     debug_events: list[dict[str, Any]],
 ) -> None:
@@ -218,6 +219,7 @@ async def _send_summary_tool_response(
     summary = await generate_summary_tool_response(
         final_response=response,
         tool_events=debug_events,
+        session_id=session_id
     )
     if not summary:
         return
