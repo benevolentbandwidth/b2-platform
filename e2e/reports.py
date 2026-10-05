@@ -41,8 +41,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Stats",
         "",
-        "| Scope | Total | Classified | Accuracy | FP | FN | Unknown |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Scope | Total | Classified | Accuracy | FP | FN |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     overall = report["stats"]["overall"]
     lines.append(_stats_row("overall", overall))
@@ -84,7 +84,7 @@ def _stats_row(label: str, stats: dict[str, Any]) -> str:
     return (
         f"| `{label}` | {stats['total']} | {stats['classified']} | "
         f"{_percent(stats['accuracy'])} | {stats['false_positives']} | "
-        f"{stats['false_negatives']} | {stats['unknown']} |"
+        f"{stats['false_negatives']} |"
     )
 
 

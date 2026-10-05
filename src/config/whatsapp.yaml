@@ -1,0 +1,11 @@
+# WhatsApp channel settings.
+version: 2
+
+summary:
+  # Model that writes the short message sent to the claimant after a
+  # verification (only when WHATSAPP_SEND_SUMMARY is on).
+  model: gemini-3.8-flash
+  # Gemini 3.x models are only served from `global`. Unset: $VERTEX_LOCATION.
+  location: global
+  # MINIMAL / LOW / MEDIUM / HIGH (Gemini 3 only; leave unset on 2.5).
+  thinking_level: LOW

@@ -32,6 +32,15 @@ def _ocr_text(image_bytes: bytes) -> str | None:
         return None
 
 
+def checksum_fields(doc_type: str | None, country: str | None) -> list[dict]:
+    """The check-digit fields document_schemas.yaml defines for this document."""
+    if not doc_type:
+        return []
+    type_schemas = _get_schemas().get("schemas", {}).get(doc_type) or {}
+    schema = type_schemas.get(country) or type_schemas.get("base") or {}
+    return [f for f in schema.get("required_fields", []) if f.get("checksum")]
+
+
 class ChecksumCheck(BaseCheck):
     check_id = "checksum"
 
@@ -40,21 +49,9 @@ class ChecksumCheck(BaseCheck):
 
     def _run_sync(self, image_bytes: bytes, context: CheckContext) -> CheckResult:
         doc_type = context.get("doc_type")
-        if not doc_type:
-            return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
-
-        schemas = _get_schemas()
-        type_schemas = schemas.get("schemas", {}).get(doc_type)
-        if not type_schemas:
-            return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
-
         country = context.get("country")
-        schema = type_schemas.get(country) or type_schemas.get("base")
-        if not schema:
-            return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
-
-        checksum_fields = [f for f in schema.get("required_fields", []) if f.get("checksum")]
-        if not checksum_fields:
+        fields = checksum_fields(doc_type, country)
+        if not fields:
             return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
 
         # Gemini-extracted fields (set by GeminiExtractCheck) are more reliable than OCR regex.
@@ -62,10 +59,18 @@ class ChecksumCheck(BaseCheck):
         extracted = context.get("extracted_fields", {})
         ocr_text: str | None = None
 
-        failures = []
-        for field in checksum_fields:
+        # A field we could not read is not a failed check digit. CHECKSUM_FAIL
+        # forces human review, so it must mean "read the number, digit wrong",
+        # never "could not find the number" (blurry photo, or a document
+        # misclassified as a type that carries a check digit).
+        failures: list[str] = []
+        unread: list[str] = []
+        validated: list[str] = []
+        for field in fields:
             algorithm = field["checksum"]
             fn = _ALGORITHMS.get(algorithm)
+            if fn is None:
+                continue  # unsupported algorithm: nothing was checked
 
             # Prefer extracted value keyed by algorithm name (e.g. "iban" → extracted["iban"])
             value = extracted.get(algorithm)
@@ -81,11 +86,22 @@ class ChecksumCheck(BaseCheck):
                         value = m.group(0) if m else None
 
             if value is None:
-                failures.append(field["name"])
+                unread.append(field["name"])
                 continue
 
-            if fn and not fn(str(value)):
+            if fn(str(value)):
+                validated.append(field["name"])
+            else:
                 failures.append(field["name"])
+
+        if not failures and not validated:
+            return CheckResult(
+                check=self.check_id,
+                passed=True,
+                confidence=0.0,
+                skipped=True,
+                signals={"reason": "check-digit fields not found", "unread_fields": unread},
+            )
 
         if failures:
             return CheckResult(
@@ -94,7 +110,7 @@ class ChecksumCheck(BaseCheck):
                 fake_score=1.0,
                 confidence=0.9,
                 flags=["CHECKSUM_FAIL"],
-                signals={"failed_fields": failures},
+                signals={"failed_fields": failures, "unread_fields": unread},
                 normalized_signals=NormalizedSignals(
                     category="document_authenticity",
                     confidence=0.9,

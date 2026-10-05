@@ -106,3 +106,17 @@ class TestMRZCheck:
         assert result.passed is True
         assert result.confidence == 0.0
         assert result.error is not None
+
+
+def test_not_run_on_documents_without_an_mrz():
+    """Death certificates have no MRZ; the reader used to mis-read their text as one."""
+    called = []
+    sys.modules["passporteye"] = type("P", (), {"read_mrz": lambda *a, **k: called.append(1)})
+    try:
+        result = run(MRZCheck().run(b"img", {"doc_type": "death_certificate"}))
+    finally:
+        _remove_mock_passporteye()
+
+    assert result.skipped is True
+    assert result.signals == {}
+    assert called == []

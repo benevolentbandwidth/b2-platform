@@ -5,8 +5,18 @@ import importlib
 import json
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from tools.fake_image_detector.file_formats import gemini_payload
+from tools.fake_image_detector.google_clients import (
+    gemini_client,
+    request_timeout,
+    retry_wait,
+    retryable,
+)
+from tools.fake_image_detector.gemini_settings import thinking_config, today
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -33,6 +43,17 @@ _CONSISTENCY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "registration_date", "other_visible_details",
             ],
         },
+        "claimant_account_present": {"type": "boolean"},
+        "claimant": {
+            "type": "object",
+            "properties": {
+                "relationship_to_deceased": {"type": "string", "nullable": True},
+                "dependants": {"type": "array", "items": {"type": "string"}},
+                "other_details": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["relationship_to_deceased", "dependants", "other_details"],
+        },
+        "case_note": {"type": "string"},
         "consistency_score":  {"type": "number"},
         "consistency_label":  {"type": "string", "enum": ["high", "moderate", "low"]},
         "confidence":         {"type": "number"},
@@ -42,7 +63,7 @@ _CONSISTENCY_RESPONSE_SCHEMA: dict[str, Any] = {
         "summary":            {"type": "string"},
     },
     "required": [
-        "certificate", "consistency_score", "consistency_label", "confidence",
+        "certificate", "claimant_account_present", "claimant", "case_note", "consistency_score", "consistency_label", "confidence",
         "matches", "mismatches", "uncertain_points", "summary",
     ],
 }
@@ -53,8 +74,11 @@ Use the chat history and the image together, but make only one model call.
 
 Your tasks:
 1. Extract the visible facts from the death certificate image.
-2. Compare those facts against the chat history.
-3. Produce a narrative consistency score where 1.0 means the chat history and certificate are highly consistent, and 0.0 means they strongly conflict.
+2. Decide whether the claimant has given their own account of the death. Look only at the claimant's messages (lines starting "user:"), not the assistant's. An account says at least who passed away and roughly when or where. Greetings, requests for help, or messages that only send a document are not an account. Set claimant_account_present accordingly.
+3. If there is an account, compare the certificate facts against it and produce a narrative consistency score where 1.0 means the account and certificate are highly consistent, and 0.0 means they strongly conflict.
+4. If there is no account, there is nothing to compare: still extract the certificate fully, set consistency_score to 0, consistency_label to "low", and add "no claimant account" to uncertain_points. Do not infer an account from the assistant's messages or from the certificate itself.
+5. From the claimant's own messages only, record in "claimant": who they are to the deceased (relationship_to_deceased, e.g. "sister"; null if they did not say), any children or other dependants they mention (dependants, e.g. "two children of the deceased, now in the claimant's care"), and any other circumstances relevant to an aid request (other_details). Record only what they said; do not infer.
+6. Write case_note: 2 to 4 plain sentences for a GiveLight caseworker covering who is asking and how they are related, any dependants mentioned, what they said happened, and whether that matches the certificate. Use only what the claimant said and what the certificate shows. Do not judge eligibility or authenticity.
 
 Rules:
 - Use only information visible in the image and explicitly present in the chat history.
@@ -75,6 +99,13 @@ Respond ONLY with structured data matching this schema:
     "registration_date": string|null,
     "other_visible_details": object
   },
+  "claimant_account_present": boolean,
+  "claimant": {
+    "relationship_to_deceased": string|null,
+    "dependants": [string],
+    "other_details": [string]
+  },
+  "case_note": string,
   "consistency_score": number,
   "consistency_label": "high"|"moderate"|"low",
   "confidence": number,
@@ -85,16 +116,6 @@ Respond ONLY with structured data matching this schema:
 }
 
 Do not include any text outside the structured response."""
-
-
-def _sniff_mime(image_bytes: bytes) -> str:
-    if image_bytes[:2] == b"\xff\xd8":
-        return "image/jpeg"
-    if image_bytes[:4] == b"\x89PNG":
-        return "image/png"
-    if len(image_bytes) >= 12 and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
 
 
 def _clamp01(value: Any, default: float = 0.0) -> float:
@@ -176,6 +197,9 @@ def analyze_death_certificate_consistency(
     project: str | None = None,
     location: str | None = None,
     model: str | None = None,
+    timeout_seconds: float | None = None,
+    thinking_level: str | None = None,
+    attempts: int = 1,
 ) -> dict[str, Any]:
     """Extract death certificate facts and score narrative consistency in one Gemini call.
 
@@ -200,32 +224,56 @@ def analyze_death_certificate_consistency(
 
     # Required by tests/unit/tools/death_certificate_pipeline/test_death_certificate_consistency.py
     # so the default model used by live OCR/vision checks is explicit and asserted.
-    gemini_model = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    if model is None:
+        # Imported here: the settings loader imports the models module, and this
+        # module is imported early by the package.
+        from tools.death_certificate_pipeline.config_loader import default_scoring_config
+
+        model = default_scoring_config().consistency_model  # scoring.yaml
+    gemini_model = model
 
     genai, gentypes = _load_gemini_client()
+    # Shared per process (see google_clients); Vertex takes precedence.
     if vertex_project:
-        client = genai.Client(vertexai=True, project=vertex_project, location=vertex_location)
+        client = gemini_client(genai, project=vertex_project, location=vertex_location)
     else:
-        client = genai.Client(api_key=gemini_api_key)
+        client = gemini_client(genai, api_key=gemini_api_key)
 
-    image_part = gentypes.Part.from_bytes(
-        data=bytes(image_bytes),
-        mime_type=_sniff_mime(image_bytes),
+    gemini_bytes, gemini_mime = gemini_payload(bytes(image_bytes))
+    image_part = gentypes.Part.from_bytes(data=gemini_bytes, mime_type=gemini_mime)
+
+    prompt = (
+        f"{_CONSISTENCY_PROMPT}\n\n"
+        f"Today's date is {today()}. Resolve relative dates in the chat history "
+        f"(\"last month\", \"two weeks ago\") against it, and treat any date on or "
+        f"before today as past, not future.\n\n"
+        f"Chat history:\n{transcript}\n"
     )
-
-    prompt = f"{_CONSISTENCY_PROMPT}\n\nChat history:\n{transcript}\n"
 
     config = gentypes.GenerateContentConfig(
         responseMimeType="application/json",
         responseSchema=_CONSISTENCY_RESPONSE_SCHEMA,
-        temperature=0,
+        # Default temperature: Google advises against lowering it on Gemini 3,
+        # which can loop or degrade below 1.0.
+        thinking_config=thinking_config(gentypes, thinking_level),
+        # Ends each attempt itself on timeout, so a stalled call is retried rather
+        # than waited out, and the caller's thread is released when it gives up.
+        http_options=request_timeout(gentypes, timeout_seconds),
     )
 
-    response = client.models.generate_content(
-        model=gemini_model,
-        contents=[image_part, prompt],
-        config=config,
-    )
+    # Client, image and prompt are prepared once; only the request is retried.
+    for attempt in range(max(1, attempts)):
+        try:
+            response = client.models.generate_content(
+                model=gemini_model,
+                contents=[image_part, prompt],
+                config=config,
+            )
+            break
+        except Exception as exc:
+            if attempt >= attempts - 1 or not retryable(exc):
+                raise
+            time.sleep(retry_wait(attempt))
 
     parsed = _normalize_structured_response(response)
 
@@ -235,6 +283,11 @@ def analyze_death_certificate_consistency(
 
     return {
         "certificate":       certificate,
+        # Defaults to True only so a response lacking the field is scored as
+        # before; the schema marks it required.
+        "claimant_account_present": bool(parsed.get("claimant_account_present", True)),
+        "claimant": parsed.get("claimant") if isinstance(parsed.get("claimant"), dict) else {},
+        "case_note": str(parsed.get("case_note", "")),
         "consistency_score": round(_clamp01(parsed.get("consistency_score")), 3),
         "consistency_label": str(parsed.get("consistency_label", "moderate")),
         "confidence":        round(_clamp01(parsed.get("confidence")), 3),

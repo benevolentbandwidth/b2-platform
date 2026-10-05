@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from tools.fake_image_detector.checks.base_check import BaseCheck, CheckContext
+from tools.fake_image_detector.google_clients import (
+    attempts_budget_seconds,
+    retry_wait,
+    retryable,
+    vision_client,
+)
 from tools.fake_image_detector.models import (
     CheckResult,
     GL9_FLAG_FOUND_ONLINE,
     GL9_FLAG_POSSIBLE_STOCK,
-    GL9_HARD_ESCALATION_FLAGS,
     NormalizedSignals,
 )
 
@@ -33,7 +39,7 @@ class ReverseImageCheck(BaseCheck):
     def __init__(self, params: dict | None = None) -> None:
         p = params or {}
         self._timeout_seconds = float(p.get("timeout_seconds", 10.0))
-        self._max_retries = max(1, int(p.get("max_retries", 2)))
+        self._attempts = max(1, int(p.get("attempts", 2)))  # tries, including the first
         self._stock_domains = {d.lower() for d in p.get("stock_domains", [
             "shutterstock.com",
             "gettyimages.com",
@@ -66,7 +72,9 @@ class ReverseImageCheck(BaseCheck):
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self._run_sync, image_bytes),
-                timeout=self._timeout_seconds,
+                # Backstop only: timeout_seconds limits each attempt, so a
+                # stalled call is retried rather than left running unseen.
+                timeout=attempts_budget_seconds(self._attempts, self._timeout_seconds),
             )
         except TimeoutError:
             return CheckResult(
@@ -86,13 +94,16 @@ class ReverseImageCheck(BaseCheck):
 
     def _run_sync(self, image_bytes: bytes) -> CheckResult:
         errors: list[str] = []
-        for _ in range(self._max_retries):
+        for attempt in range(self._attempts):
             try:
                 result = self._search_vision(image_bytes)
                 return self._score_result(result)
             except Exception as e:
                 errors.append(str(e))
-                continue
+                # A Vision API that is switched off (403) refuses every retry too.
+                if attempt == self._attempts - 1 or not retryable(e):
+                    break
+                time.sleep(retry_wait(attempt))
 
         return CheckResult(
             check=self.check_id,
@@ -115,9 +126,15 @@ class ReverseImageCheck(BaseCheck):
         except ImportError as e:
             raise RuntimeError(str(e)) from e
 
-        client = vision.ImageAnnotatorClient()
+        # Shared per process: creating a client per call ran credential
+        # discovery, which on a gcloud-signed-in machine started a subprocess
+        # mid-gRPC and froze the whole process for about a minute.
+        client = vision_client()
         image = vision.Image(content=image_bytes)
-        response = client.web_detection(image=image)
+        # Our own timeout and retries; without a timeout the call could run on
+        # after the check had given up, and the library's retries would stack
+        # on top of ours.
+        response = client.web_detection(image=image, timeout=self._timeout_seconds, retry=None)
 
         if response.error and response.error.message:
             raise RuntimeError(response.error.message)
@@ -202,7 +219,6 @@ class ReverseImageCheck(BaseCheck):
         domains: list[str],
     ) -> CheckResult:
         normalized_flags = self._normalize_flags(flags)
-        escalation_reasons = [f"{flag} detected by reverse_image check" for flag in normalized_flags if flag in GL9_HARD_ESCALATION_FLAGS]
         return CheckResult(
             check=self.check_id,
             passed=False,
@@ -221,8 +237,9 @@ class ReverseImageCheck(BaseCheck):
                 indicators=normalized_flags,
                 staging_score=round(fake_score, 3),
             ),
-            human_escalate=bool(escalation_reasons),
-            escalation_reasons=escalation_reasons,
+            # Flags only: whether a flag forces human review is decided by the
+            # pipeline from hard_escalation_flags in pipeline.yaml, so that list
+            # is the single source of truth.
         )
 
     def _domain_from_url(self, value: str) -> str:

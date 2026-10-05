@@ -1,9 +1,12 @@
 import base64
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from src.session_store import MAX_MEDIA_BYTES, FirestoreSessionStore
+from src.session_store import MAX_MEDIA_BYTES, MEDIA_CHUNK_BYTES, FirestoreSessionStore
 
 
 class FakeSnapshot:
@@ -243,3 +246,135 @@ def test_save_media_skips_oversized_image() -> None:
 
     assert ok is False
     assert document.writes == []
+
+
+# ---------------------------------------------------------------------------
+# large images, split across several records
+# ---------------------------------------------------------------------------
+
+class _MemoryFirestore:
+    """Path-keyed stand-in for Firestore that supports sub-collections."""
+
+    def __init__(self):
+        self.docs: dict[str, dict] = {}
+
+    def collection(self, name):
+        return _MemoryCollection(self, name)
+
+
+class _MemoryCollection:
+    def __init__(self, db, path):
+        self.db, self.path = db, path
+
+    def document(self, doc_id):
+        return _MemoryDocument(self.db, f"{self.path}/{doc_id}")
+
+
+class _MemoryDocument:
+    def __init__(self, db, path):
+        self.db, self.path = db, path
+
+    def get(self):
+        data = self.db.docs.get(self.path)
+        return SimpleNamespace(exists=data is not None, to_dict=lambda: dict(data) if data else None)
+
+    def set(self, data, merge=False):
+        self.db.docs[self.path] = dict(data)
+
+    def delete(self):
+        self.db.docs.pop(self.path, None)
+
+    def collection(self, name):
+        return _MemoryCollection(self.db, f"{self.path}/{name}")
+
+
+def _pieces(db):
+    return {path: doc for path, doc in db.docs.items() if "data_b64" in doc}
+
+
+def _store(db, now=datetime(2026, 1, 1, tzinfo=timezone.utc)):
+    return FirestoreSessionStore(client=db, server_timestamp="SERVER_TIME", now=lambda: now)
+
+
+def _image(size: int, seed: int = 7) -> bytes:
+    return bytes((i * seed) % 251 for i in range(size))
+
+
+def test_large_image_round_trips_across_several_records() -> None:
+    """Regression: anything over 700 KB used to be dropped, and the claimant was
+    told no document had been received. Most PDFs and screenshots are bigger."""
+    db = _MemoryFirestore()
+    store = _store(db)
+    image = _image(int(MEDIA_CHUNK_BYTES * 3.5))
+
+    assert store.save_media("s1", image, mime_type="application/pdf") is True
+    assert store.load_latest_media("s1") == (image, "application/pdf")
+    assert len(_pieces(db)) == 4
+
+
+def test_every_record_stays_under_the_firestore_document_limit() -> None:
+    db = _MemoryFirestore()
+    _store(db).save_media("s1", _image(MAX_MEDIA_BYTES), mime_type="image/png")
+
+    for doc in db.docs.values():
+        assert sum(len(str(v)) for v in doc.values()) < 1_000_000
+
+
+def test_pieces_carry_the_record_expiry() -> None:
+    db = _MemoryFirestore()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _store(db, now).save_media("s1", _image(MEDIA_CHUNK_BYTES * 2), mime_type="image/png")
+
+    assert all(doc["expires_at"] == now + timedelta(hours=72) for doc in _pieces(db).values())
+
+
+@pytest.mark.parametrize("second_size", [1_000, MEDIA_CHUNK_BYTES * 2], ids=["small", "large"])
+def test_a_new_upload_clears_the_previous_pieces(second_size) -> None:
+    db = _MemoryFirestore()
+    store = _store(db)
+    store.save_media("s1", _image(MEDIA_CHUNK_BYTES * 3), mime_type="image/png")
+    second = _image(second_size, seed=13)
+
+    store.save_media("s1", second, mime_type="image/jpeg")
+
+    assert store.load_latest_media("s1") == (second, "image/jpeg")
+    expected = 0 if second_size <= MEDIA_CHUNK_BYTES else 2
+    assert len(_pieces(db)) == expected
+
+
+def test_a_missing_piece_reads_as_no_image_rather_than_a_corrupt_one() -> None:
+    db = _MemoryFirestore()
+    store = _store(db)
+    store.save_media("s1", _image(MEDIA_CHUNK_BYTES * 2), mime_type="image/png")
+    db.docs.pop(sorted(_pieces(db))[0])
+
+    assert store.load_latest_media("s1") is None
+
+
+def test_expired_large_image_is_deleted_with_its_pieces() -> None:
+    db = _MemoryFirestore()
+    saved_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _store(db, saved_at).save_media("s1", _image(MEDIA_CHUNK_BYTES * 2), mime_type="image/png")
+
+    later = _store(db, saved_at + timedelta(hours=73))
+    assert later.load_latest_media("s1") is None
+    assert db.docs == {}
+
+
+def test_image_over_the_limit_is_refused_and_nothing_is_written() -> None:
+    db = _MemoryFirestore()
+    assert _store(db).save_media("s1", _image(MAX_MEDIA_BYTES + 1), mime_type="image/png") is False
+    assert db.docs == {}
+
+
+
+def test_pieces_share_the_media_collection_group_for_ttl() -> None:
+    """Firestore TTL policies are per collection group. Pieces in a differently
+    named sub-collection would need a policy of their own; without one they
+    would never be deleted."""
+    db = _MemoryFirestore()
+    _store(db).save_media("s1", _image(MEDIA_CHUNK_BYTES * 2), mime_type="image/png")
+
+    for path in _pieces(db):
+        collection_id = path.split("/")[-2]
+        assert collection_id == "session_media"

@@ -17,6 +17,8 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
+from tools.fake_image_detector import gemini_settings
+
 from . import prompts, tools
 from .context import SessionContext
 
@@ -125,9 +127,19 @@ class Agent:
     def _model_settings_from_provider(provider: dict[str, Any], model_name: str) -> dict[str, Any]:
         settings = dict(provider.get("settings", {}) or {})
         thinking_budget = settings.pop("thinking_budget", None)
-        if thinking_budget is not None and "google_thinking_config" not in settings:
+        thinking_level = gemini_settings.thinking_level(
+            settings.pop("thinking_level", None), "provider.settings"
+        )
+        if "google_thinking_config" in settings:
+            return settings
+        if thinking_level is not None:
+            # Gemini 3 sets thinking by level; 2.5 rejects a level.
+            settings["google_thinking_config"] = {"thinking_level": thinking_level}
+        elif thinking_budget is not None:
             if model_name.startswith("gemini-3") and int(thinking_budget) == 0:
-                settings["google_thinking_config"] = {"thinking_level": "MINIMAL"}
+                # Gemini 3 cannot switch thinking off. LOW is the lowest level every
+                # Gemini 3 model accepts: 3.8 Flash rejects MINIMAL with a 400.
+                settings["google_thinking_config"] = {"thinking_level": "LOW"}
             else:
                 settings["google_thinking_config"] = {"thinking_budget": int(thinking_budget)}
         return settings

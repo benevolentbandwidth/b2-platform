@@ -37,7 +37,12 @@ class OCRDocumentCheck(BaseCheck):
         text_lower = text.lower()
         schemas = _get_schemas()
 
-        doc_type = self._detect_doc_type(text_lower, schemas.get("detection_keywords", {}))
+        # A caller that already knows the document type (the death-certificate
+        # pipeline) sets it; keyword detection only fills it in when missing and
+        # must not overwrite it. Country detection runs either way.
+        doc_type = context.get("doc_type") or self._detect_doc_type(
+            text_lower, schemas.get("detection_keywords", {})
+        )
 
         if doc_type is None:
             return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
@@ -76,6 +81,10 @@ class OCRDocumentCheck(BaseCheck):
             "DE": ["bundesrepublik deutschland", "germany", "deutschland"],
             "KE": ["republic of kenya", "kenya"],
             "NG": ["federal republic of nigeria", "nigeria"],
+            "ID": ["republik indonesia", "indonesia"],
+            # Moroccan civil documents carry French alongside Arabic; Tesseract
+            # reads the French with its default language.
+            "MA": ["royaume du maroc", "المملكة المغربية", "maroc", "morocco"],
         }
         for country, signals in _COUNTRY_SIGNALS.items():
             if any(s in text_lower for s in signals):

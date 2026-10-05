@@ -9,7 +9,7 @@ reach the transient store or the rendered conversation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -19,5 +19,11 @@ class SessionContext:
 
     session_id: str | None = None
     store: Any | None = None          # FirestoreSessionStore (history + media)
-    history_text: str = ""            # rendered prior conversation, used as narrative
+    # The conversation so far, including the message being answered, rendered
+    # as "user:"/"assistant:" lines; the verification tool's narrative.
+    history_text: str = ""
     debug_events: list[dict[str, Any]] | None = None
+    # The claimant's own messages, including the one being answered, verbatim and
+    # one entry per message, so they reach GiveLight exactly as written rather
+    # than only as an AI summary.
+    claimant_messages: list[str] = field(default_factory=list)

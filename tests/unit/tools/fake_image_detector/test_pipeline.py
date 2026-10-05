@@ -249,3 +249,173 @@ def test_zero_confidence_stage1_results_flag_for_review():
     assert result.risk_score == 0.21
     assert result.verdict == Verdict.FLAG
     assert result.escalation == Escalation.HUMAN_REVIEW
+
+
+def _synthid_hit() -> CheckResult:
+    return CheckResult(
+        check="synthid",
+        passed=False,
+        fake_score=0.9,
+        confidence=0.9,
+        flags=["SYNTHID_WATERMARK_DETECTED"],
+    )
+
+
+def test_hard_escalation_flags_come_from_config():
+    """Adding a flag to hard_escalation_flags makes that signal decisive.
+
+    Built from explicit configs so it holds whatever the shipped list says:
+    without the flag a watermark hit alone does not force review; with it, it
+    does, with no code change.
+    """
+    def build(flags):
+        synthid = _StubCheck(_synthid_hit())
+        config = PipelineConfig(
+            clear_fail=0.8,
+            clear_pass=0.2,
+            checks=[_cfg("synthid")],
+            hard_escalation_flags=frozenset(flags),
+        )
+        return FakeImageDetectorPipeline(config=config, checks=[(_cfg("synthid"), synthid)], gemini_check=None)
+
+    default = run(build({"FOUND_ONLINE", "POSSIBLE_STOCK"}).run(b"img", {"input_type": "document"}))
+    decisive = run(
+        build({"FOUND_ONLINE", "POSSIBLE_STOCK", "SYNTHID_WATERMARK_DETECTED"}).run(
+            b"img", {"input_type": "document"}
+        )
+    )
+
+    assert "hard escalation" not in (default.early_exit_reason or "")
+    assert decisive.escalation == Escalation.HUMAN_REVIEW
+    assert "hard escalation" in (decisive.early_exit_reason or "")
+
+
+def test_shipped_config_lists_hard_escalation_flags():
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+
+    assert load_pipeline_config().hard_escalation_flags == frozenset(
+        {"FOUND_ONLINE", "POSSIBLE_STOCK", "SYNTHID_WATERMARK_DETECTED", "CHECKSUM_FAIL",
+         "INTERNAL_INCONSISTENCY"}
+    )
+
+
+def test_shipped_config_has_a_version():
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+
+    assert isinstance(load_pipeline_config().version, int)
+
+
+def test_config_without_version_is_refused(tmp_path):
+    import pytest
+
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        "thresholds:\n  clear_fail: 0.8\n  clear_pass: 0.2\n"
+        "hard_escalation_flags: [FOUND_ONLINE]\nchecks: []\n"
+    )
+    with pytest.raises(ValueError, match="version"):
+        load_pipeline_config(path)
+
+
+def test_config_without_hard_escalation_flags_is_refused(tmp_path):
+    import pytest
+
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+
+    path = tmp_path / "pipeline.yaml"
+    path.write_text("version: 1\nthresholds:\n  clear_fail: 0.8\n  clear_pass: 0.2\nchecks: []\n")
+    with pytest.raises(ValueError, match="hard_escalation_flags"):
+        load_pipeline_config(path)
+
+
+def test_internal_inconsistency_from_gemini_forces_review_with_shipped_config():
+    """A certificate whose own details contradict each other goes to a person."""
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+
+    gemini = _StubCheck(
+        CheckResult(
+            check="gemini_vision",
+            passed=False,
+            fake_score=0.4,
+            confidence=0.8,
+            flags=["INTERNAL_INCONSISTENCY"],
+        )
+    )
+    config = load_pipeline_config()
+    exif = _StubCheck(_passing("exif"))
+    pipeline = FakeImageDetectorPipeline(
+        config=PipelineConfig(
+            clear_fail=config.clear_fail,
+            clear_pass=config.clear_pass,
+            checks=[_cfg("exif")],
+            hard_escalation_flags=config.hard_escalation_flags,
+        ),
+        checks=[(_cfg("exif"), exif)],
+        gemini_check=gemini,
+    )
+
+    result = run(pipeline.run(b"img", {"input_type": "document"}))
+
+    assert result.escalation == Escalation.HUMAN_REVIEW
+    assert "INTERNAL_INCONSISTENCY" in (result.early_exit_reason or "")
+
+
+def test_gemini_timeouts_come_from_settings():
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+
+    config = load_pipeline_config()
+    extract = next(c for c in config.checks if c.id == "gemini_extract")
+    # Per attempt for the fraud check, which retries a stalled call.
+    assert config.gemini.timeout_seconds == 30
+    assert config.gemini.attempts == 2
+    assert extract.params["timeout_seconds"] == 60
+
+
+
+def test_the_settings_list_decides_escalation_in_both_directions():
+    """Checks used to set human_escalate from a hardcoded list, which bypassed
+    the settings: a flag removed from pipeline.yaml still forced review."""
+    found_online = CheckResult(  # shape the real reverse_image check returns
+        check="reverse_image", passed=False, fake_score=0.75, confidence=0.71,
+        flags=["FOUND_ONLINE"],
+    )
+
+    def build(flags):
+        config = PipelineConfig(
+            clear_fail=0.8, clear_pass=0.2, checks=[_cfg("reverse_image")],
+            hard_escalation_flags=frozenset(flags),
+        )
+        return FakeImageDetectorPipeline(
+            config=config, checks=[(_cfg("reverse_image"), _StubCheck(found_online))]
+        )
+
+    listed = run(build({"FOUND_ONLINE"}).run(b"img", {"input_type": "document"}))
+    removed = run(build(set()).run(b"img", {"input_type": "document"}))
+
+    assert "hard escalation" in (listed.early_exit_reason or "")
+    assert "hard escalation" not in (removed.early_exit_reason or "")
+
+
+
+def test_gemini_models_come_from_settings(tmp_path):
+    """Models used to come from VERTEX_MODEL or a hardcoded default."""
+    import pytest
+
+    from tools.fake_image_detector.config_loader import load_pipeline_config
+    from tools.fake_image_detector.pipeline import build_pipeline
+
+    pipeline = build_pipeline()
+    extract = next(check for cfg, check in pipeline._checks if cfg.id == "gemini_extract")
+    config = load_pipeline_config()
+    assert pipeline._gemini_check._model == config.gemini.model
+    assert extract._model == next(c for c in config.checks if c.id == "gemini_extract").params["model"]
+
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        "version: 1\nthresholds: {clear_fail: 0.8, clear_pass: 0.2}\n"
+        "hard_escalation_flags: [FOUND_ONLINE]\ngemini: {enabled: true}\nchecks: []\n"
+    )
+    with pytest.raises(ValueError, match="gemini.model"):
+        load_pipeline_config(path)

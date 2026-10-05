@@ -47,9 +47,23 @@ tests/fixtures/dataset/
 # Scripts
 run_live_gemini_test_plan*
 
-# Death Certificates
+# Death Certificates — real or fake, they never go in git.
 tests/test_dc/*
 !tests/test_dc/README.md
+# Every e2e case folder stays local, whatever the country is called. Only the
+# README and the fictional, text-only example cases are tracked.
+e2e_cases/*
+!e2e_cases/README.md
+!e2e_cases/example/
 e2e_cases/example/fake/*
 !e2e_cases/example/fake/case_000
-e2e_cases/Indonesia
+# Belt and braces: no certificate files even inside the example cases.
+e2e_cases/example/**/*.jpg
+e2e_cases/example/**/*.jpeg
+e2e_cases/example/**/*.png
+e2e_cases/example/**/*.webp
+e2e_cases/example/**/*.heic
+e2e_cases/example/**/*.heif
+e2e_cases/example/**/*.tif
+e2e_cases/example/**/*.tiff
+e2e_cases/example/**/*.pdf

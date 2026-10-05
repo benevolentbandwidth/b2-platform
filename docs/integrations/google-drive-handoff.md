@@ -1,10 +1,34 @@
 # Google Drive handoff
 
-Accepted death-certificate cases are uploaded to GiveLight as two files with a
-shared filename stem: the JSON verification payload and the original image (or
-PDF). The stem is an opaque `death-certificate-<uuid>` identifier and does not
-contain a contact-derived value or submission timestamp. The destination should
-be a folder in a Google Shared Drive.
+Every case where the claimant sent a document is uploaded to GiveLight as two
+files: the original document and a JSON payload. There is no review queue on
+the B2 side — GiveLight's reviewers are the human review — so cases that were
+not automatically accepted are uploaded too, marked as needing review. The
+destination should be a folder in a Google Shared Drive.
+
+## Reading the folder
+
+- **Two kinds of case**, by `decision` in the JSON and in the file name:
+  - `death-certificate-accepted-<reference>` — cleared automatic acceptance.
+  - `death-certificate-needs-review-<reference>` — needs a person to look at it.
+    `review_reasons` says why in plain terms (for example, the claimant's
+    account and the certificate disagree, or a check could not run), and
+    `authenticity` lists which fraud checks ran, flagged or errored.
+- **`case_reference`** (e.g. `DC-7F3A-9C21-B4E8`) is also given to the claimant,
+  so a case can be found by searching Drive for the number they quote.
+- **A JSON file means a complete case.** The document is uploaded first and the
+  JSON last, so a JSON only appears once its document is already in the folder.
+  The JSON names its document in `image_file`; a document with no matching
+  JSON is an interrupted upload (logged as `handoff.incomplete`) and can be
+  ignored. The claimant is asked to resend when an upload fails.
+- **The document is exactly what the claimant sent**, byte for byte. (TIFFs are
+  converted to PNG only for Gemini's analysis, never for this upload.)
+- `contact_phone` is the claimant's WhatsApp number, international format
+  without a leading `+`, so GiveLight can contact the family.
+- `config_versions` records the `scoring` and `detector` settings versions that
+  produced the verdict.
+- Rarely, a network retry can upload the same file twice. Copies share a name
+  and belong to the same case.
 
 ## Google Cloud and GiveLight setup
 

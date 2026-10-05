@@ -18,7 +18,6 @@ from tools.fake_image_detector.config_loader import PipelineConfig, load_pipelin
 from tools.fake_image_detector.models import (
     CheckResult,
     Escalation,
-    GL9_HARD_ESCALATION_FLAGS,
     ToolResult,
     Verdict,
 )
@@ -51,6 +50,10 @@ class FakeImageDetectorPipeline:
         self._checks = checks
         self._gemini_check = gemini_check
         self._vision_semaphore = asyncio.Semaphore(max(1, gemini_max_concurrency))
+
+    @property
+    def config(self) -> PipelineConfig:
+        return self._config
 
     async def run(self, image_bytes: bytes, context: dict | None = None) -> ToolResult:
         if context is None:
@@ -129,10 +132,7 @@ class FakeImageDetectorPipeline:
                     escalation=Escalation.HUMAN_REVIEW,
                     checks=results,
                     early_exit=True,
-                    early_exit_reason=(
-                        f"{check_cfg.id} triggered hard escalation: "
-                        f"{self._hard_escalation_flags(result.flags)}"
-                    ),
+                    early_exit_reason=self._escalation_reason(check_cfg.id, result),
                 )
 
             if check_cfg.early_exit_on_fail and not result.passed and not result.skipped:
@@ -199,10 +199,7 @@ class FakeImageDetectorPipeline:
                 escalation=Escalation.HUMAN_REVIEW,
                 checks=stage1.checks + [result],
                 early_exit=True,
-                early_exit_reason=(
-                    "gemini_vision triggered hard escalation: "
-                    f"{self._hard_escalation_flags(result.flags)}"
-                ),
+                early_exit_reason=self._escalation_reason("gemini_vision", result),
             )
 
         verdict, escalation = self._classify(final_risk)
@@ -227,7 +224,13 @@ class FakeImageDetectorPipeline:
         return round(sum(r.fake_score * r.confidence for r in active) / total_weight, 4)
 
     def _hard_escalation_flags(self, flags: list[str]) -> list[str]:
-        return [flag for flag in flags if flag in GL9_HARD_ESCALATION_FLAGS]
+        return [flag for flag in flags if flag in self._config.hard_escalation_flags]
+
+    def _escalation_reason(self, check_id: str, result: CheckResult) -> str:
+        flags = self._hard_escalation_flags(result.flags)
+        if flags:
+            return f"{check_id} triggered hard escalation: {flags}"
+        return f"{check_id} requested human review"
 
     def _should_force_human_escalation(self, result: CheckResult) -> bool:
         if result.human_escalate:
@@ -318,7 +321,10 @@ def build_pipeline(config_path=None) -> FakeImageDetectorPipeline:
     gemini_check = (
         gemini_cls(
             timeout_seconds=config.gemini.timeout_seconds,
-            max_retries=config.gemini.max_retries,
+            attempts=config.gemini.attempts,
+            model=config.gemini.model,
+            location=config.gemini.location,
+            thinking_level=config.gemini.thinking_level,
         )
         if config.gemini.enabled and gemini_cls is not None
         else None

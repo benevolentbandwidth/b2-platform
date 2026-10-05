@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
+import time
 
 from tools.fake_image_detector.checks.base_check import BaseCheck
+from tools.fake_image_detector.file_formats import gemini_payload
+from tools.fake_image_detector.gemini_settings import thinking_config, today
+from tools.fake_image_detector.google_clients import (
+    attempts_budget_seconds,
+    gemini_client,
+    request_timeout,
+    retry_wait,
+    retryable,
+)
 from tools.fake_image_detector.models import (
     CheckResult,
     GL9_FLAG_EDITING_ARTIFACTS,
     GL9_FLAG_FOUND_ONLINE,
     GL9_FLAG_POSSIBLE_STOCK,
-    GL9_HARD_ESCALATION_FLAGS,
     NormalizedSignals,
 )
 
@@ -41,7 +51,8 @@ Do not include any text outside the JSON object."""
 
 _DOCUMENT_PROMPT_TEMPLATE = """\
 You are a fraud-detection assistant. This image has been identified as a {doc_type}{country_clause}.
-{extracted_section}
+Today's date is {today}. Any date on or before today is in the past, not the future; judge dates against today, not against what you know.
+
 Assess whether this appears to be a GENUINE, AUTHENTIC document or whether it is deceptive in any of the following ways:
 
 1. FORGED or FABRICATED — a printed template, photoshop creation, or entirely made-up document.
@@ -50,6 +61,13 @@ Assess whether this appears to be a GENUINE, AUTHENTIC document or whether it is
 4. TEMPLATE DETECTED — produced from an online template without official security features.
 5. INCONSISTENT SECURITY FEATURES — missing expected holograms, watermarks, or official markings.
 6. LANGUAGE INCONSISTENCY — the language or script used in the document does not match what is expected for the claimed country or document type (e.g. an English-only passport from a non-English-issuing country, mismatched official seals or text).
+7. INTERNAL INCONSISTENCY — details on the document contradict each other: a registration or issue date before the date of death, an age that does not match the dates of birth and death, or a date that cannot exist. Documents may show dates in more than one calendar (e.g. Hijri alongside Gregorian on Moroccan certificates) or in local formats; convert before comparing, and never report a difference that is only a calendar or format conversion. Report this only when you can name the two details that contradict each other, and name them in "signals".
+
+Rule for INTERNAL INCONSISTENCY: compare only dates, ages and places that are written out on the document in words or as dates. Treat every identity or registration number (an Indonesian NIK, a certificate number, any ID number) as opaque: never decode one for any purpose — not a date, not a region, not a sex — and never compare anything derived from one against the rest of the document. Examples of what is NOT an internal inconsistency and NOT evidence of manipulation: the birth date or the region code encoded in an NIK not matching the written birth date or place. People move, and NIKs are often issued with different details.
+
+Ordinary capture and scan artifacts are NOT evidence of deception on their own. Do not treat a photograph of a physical document, perspective distortion, glare or reflections, table or background surroundings, shadows, cropping, uneven illumination, compression, or scanner/CamScanner cleanup as evidence of forgery or alteration.
+
+Set "is_deceptive" to true, or include PHOTO_OF_PHOTO or EDITING_ARTIFACTS, only when there is visible document-content or compositing inconsistency that supports the finding. Do not use those findings for capture or scan quality alone.
 
 Do NOT make a final verdict. Report only the signals you observe.
 
@@ -60,7 +78,8 @@ Respond ONLY with valid JSON matching this schema:
   "confidence": <float 0.0-1.0, how certain you are about your assessment>,
   "signals": [<list of short specific observed-indicator strings, e.g. "no visible hologram", "font inconsistency on expiry date", "document language does not match issuing country">],
   "flags": [<zero or more from: FORGED_DOCUMENT, PHOTO_OF_PHOTO, EDITING_ARTIFACTS,
-             TEMPLATE_DETECTED, INCONSISTENT_SECURITY_FEATURES, LANGUAGE_INCONSISTENCY, CLEAN>]
+             TEMPLATE_DETECTED, INCONSISTENT_SECURITY_FEATURES, LANGUAGE_INCONSISTENCY,
+             INTERNAL_INCONSISTENCY, CLEAN>]
 }}
 Do not include any text outside the JSON object.\
 """
@@ -94,6 +113,16 @@ def _sanitize_doc_type(value: object) -> str:
     return cleaned[:64] if cleaned else "document"
 
 
+
+_COUNTRY_NAMES = {
+    "ID": "Indonesia",
+    "MA": "Morocco",
+    "DE": "Germany",
+    "KE": "Kenya",
+    "NG": "Nigeria",
+}
+
+
 def _sanitize_country(value: object) -> str:
     if value is None:
         return ""
@@ -101,16 +130,6 @@ def _sanitize_country(value: object) -> str:
     cleaned = re.sub(r"\s+", "", cleaned)
     cleaned = re.sub(r"[^A-Z0-9]", "", cleaned)
     return cleaned[:3]
-
-
-def _sniff_mime(image_bytes: bytes) -> str:
-    if image_bytes[:2] == b"\xff\xd8":
-        return "image/jpeg"
-    if image_bytes[:4] == b"\x89PNG":
-        return "image/png"
-    if len(image_bytes) >= 12 and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
 
 
 def _normalize_flags(raw_flags: list[str]) -> list[str]:
@@ -137,38 +156,54 @@ class GeminiVisionCheck(BaseCheck):
         project: str | None = None,
         location: str | None = None,
         timeout_seconds: float = 30.0,
-        max_retries: int = 3,
+        attempts: int = 3,
+        model: str = "gemini-2.5-flash",
+        thinking_level: str | None = None,
     ):
         self._project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
         self._location = location or os.environ.get("VERTEX_LOCATION", "us-central1")
         self._timeout_seconds = timeout_seconds
-        self._max_retries = max(1, max_retries)
+        self._model = model
+        self._thinking_level = thinking_level
+        self._attempts = max(1, attempts)
 
     async def run(self, image_bytes: bytes, context: dict) -> CheckResult:
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self._run_sync, image_bytes, context),
-                timeout=self._timeout_seconds,
+                # Backstop only, in case the client fails to enforce its own timeout.
+                # timeout_seconds limits each attempt, so a stalled call is retried.
+                timeout=attempts_budget_seconds(self._attempts, self._timeout_seconds),
             )
         except TimeoutError:
             return self._error_result("Gemini vision check timed out", "CHECK_TIMEOUT")
 
     def _error_result(self, error: str, flag: str = "CHECK_RUNTIME_ERROR") -> CheckResult:
+        """An unreachable detector is not evidence of forgery.
+
+        Routed to human review via human_escalate rather than scored as a
+        certain fake. Scoring it 1.0 meant a timeout or a malformed model
+        response auto-rejected a genuine certificate.
+        """
         return CheckResult(
             check=self.check_id,
             passed=False,
-            fake_score=1.0,
-            confidence=1.0,
+            fake_score=0.0,
+            confidence=0.0,
             flags=[flag],
             signals={"error": error},
             skipped=False,
+            human_escalate=True,
             error=error,
         )
 
     def _run_sync(self, image_bytes: bytes, context: dict) -> CheckResult:
         try:
-            from google import genai
-            from google.genai import types as gentypes
+            # importlib (not `from google import genai`) so the lookup goes through
+            # sys.modules. Attribute-style import resolves off the already-imported
+            # `google` package and silently bypasses test stubs.
+            genai = importlib.import_module("google.genai")
+            gentypes = importlib.import_module("google.genai.types")
         except ImportError as e:
             return self._error_result(str(e))
 
@@ -181,44 +216,61 @@ class GeminiVisionCheck(BaseCheck):
         if doc_type:
             safe_doc_type = _sanitize_doc_type(doc_type)
             safe_country = _sanitize_country(country)
-            country_clause = f" from {safe_country}" if safe_country else ""
-            extracted = context.get("extracted_fields", {})
-            if extracted:
-                lines = "\n".join(f"  - {k}: {v}" for k, v in extracted.items())
-                extracted_section = f"\nExtracted fields:\n{lines}\n"
-            else:
-                extracted_section = ""
+            # The sanitised code is mapped to a fixed name, so the guard against
+            # prompt injection still holds; a bare "ID" reads as "identity".
+            country_name = _COUNTRY_NAMES.get(safe_country, safe_country)
+            country_clause = f" from {country_name}" if safe_country else ""
+            # The extraction check's readings are deliberately NOT passed in. This
+            # check reads the image itself; given a second set of readings it hunted
+            # for differences and invented them (a genuine certificate scored 0.90
+            # "forged" with them, 0.10 without, 3/3 each). Those readings also vary
+            # run to run, so a different genuine certificate was flagged each time,
+            # and they carried unfiltered text from the document into this prompt.
             prompt = _DOCUMENT_PROMPT_TEMPLATE.format(
                 doc_type=safe_doc_type,
                 country_clause=country_clause,
-                extracted_section=extracted_section,
+                today=today(),
             )
         else:
             safe_doc_type = None
             safe_country = ""
             prompt = _PHOTO_PROMPT
 
-        model = os.environ.get("VERTEX_MODEL", "gemini-2.5-flash")
+        model = self._model  # from gemini.model in pipeline.yaml
+
+        try:
+            # Shared per process (see google_clients). The payload is prepared
+            # once, not per attempt: it decodes and may resize a large image.
+            client = gemini_client(genai, project=self._project, location=self._location)
+            gemini_bytes, gemini_mime = gemini_payload(image_bytes)
+            image_part = gentypes.Part.from_bytes(data=gemini_bytes, mime_type=gemini_mime)
+        except Exception as e:
+            return self._error_result(str(e))
 
         raw = ""
-        for attempt in range(self._max_retries):
+        for attempt in range(self._attempts):
             try:
-                client = genai.Client(
-                    vertexai=True, project=self._project, location=self._location
-                )
-                image_part = gentypes.Part.from_bytes(
-                    data=image_bytes, mime_type=_sniff_mime(image_bytes)
-                )
                 response = client.models.generate_content(
-                    model=model, contents=[image_part, prompt]
+                    model=model,
+                    contents=[image_part, prompt],
+                    # Default temperature: Google advises against lowering it on
+                    # Gemini 3, which can loop or degrade below 1.0.
+                    config=gentypes.GenerateContentConfig(
+                        # JSON output, not JSON asked for in prose: at the default
+                        # temperature a reply wrapped in text or cut short would
+                        # otherwise send a genuine case to review.
+                        response_mime_type="application/json",
+                        thinking_config=thinking_config(gentypes, self._thinking_level),
+                        # Ends this attempt itself, so a stalled call is retried.
+                        http_options=request_timeout(gentypes, self._timeout_seconds),
+                    ),
                 )
                 raw = response.text
                 break
             except Exception as e:
-                is_last_attempt = attempt == self._max_retries - 1
-                if is_last_attempt:
+                if attempt == self._attempts - 1 or not retryable(e):
                     return self._error_result(str(e))
-                continue
+                time.sleep(retry_wait(attempt))
 
         try:
             match = _JSON_RE.search(raw)
@@ -238,11 +290,6 @@ class GeminiVisionCheck(BaseCheck):
         flags = _normalize_flags([str(f) for f in data.get("flags", [])])
         raw_age = data.get("estimated_age")
         estimated_age = int(raw_age) if raw_age is not None else None
-        escalation_reasons = [
-            f"{flag} detected by gemini_vision check"
-            for flag in flags
-            if flag in GL9_HARD_ESCALATION_FLAGS
-        ]
         signals = {
             "doc_type": safe_doc_type if doc_type else None,
             "country": safe_country if doc_type else "",
@@ -270,6 +317,7 @@ class GeminiVisionCheck(BaseCheck):
                     f in {"STAGING_ARTIFACTS", GL9_FLAG_POSSIBLE_STOCK} for f in flags
                 ) else None,
             ),
-            human_escalate=bool(escalation_reasons),
-            escalation_reasons=escalation_reasons,
+            # Flags only: whether a flag forces human review is decided by the
+            # pipeline from hard_escalation_flags in pipeline.yaml, so that list
+            # is the single source of truth.
         )

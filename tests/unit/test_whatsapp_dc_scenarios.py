@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tests.unit.test_api import FakeRequest
 from tools.death_certificate_pipeline import verify as verify_module
 from tools.death_certificate_pipeline import pipeline as pipeline_module
@@ -126,7 +128,10 @@ async def test_whatsapp_death_certificate_scenarios_print_expected_vs_actual_sco
     ]
     places = ["Seattle", "Nairobi", "Casablanca", "Rabat", "Marrakesh", "Austin", "Detroit", "Chicago", "Fez"]
 
-    assert image_files, f"expected at least one non-SVG fixture in {TEST_DC_DIR}"
+    if not image_files:
+        # tests/test_dc/* is gitignored: real certificates must not be committed,
+        # so this only runs where someone has put fixtures there locally.
+        pytest.skip(f"no certificate fixtures in {TEST_DC_DIR} (see its README)")
     assert len(expected_scores) >= len(image_files)
 
     scenarios = []

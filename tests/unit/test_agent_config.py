@@ -66,6 +66,28 @@ def test_all_agent_definitions_construct_google_vertex_models(monkeypatch):
         assert agent.pydantic_ai_agent.model.model_name == definition.provider["model"]
 
     assert FakeModel.calls
-    assert all(model_name == "gemini-2.5-flash" for model_name, _provider in FakeModel.calls)
+    # Gemini 3.x is only served from `global`; a regional location returns 404.
+    for model_name, provider in FakeModel.calls:
+        if model_name.startswith("gemini-3"):
+            assert provider.kwargs["location"] == "global", model_name
     assert all(call["vertexai"] is True for call in FakeProvider.calls)
     assert all(call["project"] == "test-project" for call in FakeProvider.calls)
+
+
+def test_thinking_level_setting_reaches_gemini():
+    settings = agent_module.Agent._model_settings_from_provider(
+        {"settings": {"thinking_level": "low"}}, "gemini-3.8-flash"
+    )
+    assert settings == {"google_thinking_config": {"thinking_level": "LOW"}}
+
+
+def test_thinking_budget_zero_on_gemini_3_asks_for_low_not_minimal():
+    """3.8 Flash rejects MINIMAL with a 400, which would fail every chat turn."""
+    settings = agent_module.Agent._model_settings_from_provider(
+        {"settings": {"thinking_budget": 0}}, "gemini-3.8-flash"
+    )
+    assert settings == {"google_thinking_config": {"thinking_level": "LOW"}}
+    settings = agent_module.Agent._model_settings_from_provider(
+        {"settings": {"thinking_budget": 0}}, "gemini-2.5-flash"
+    )
+    assert settings == {"google_thinking_config": {"thinking_budget": 0}}

@@ -1,9 +1,12 @@
 name: death_certificate_verification
 description: >
-  Verifies the death certificate the user most recently uploaded: runs the full
-  reliability pipeline (document, authenticity, narrative consistency, score) and,
-  if it passes, hands the case off to GiveLight. Call this once the user has sent a
-  document image — the image is pulled automatically and you do not pass it in.
+  Verifies the death certificate the user most recently uploaded against what they
+  have told you about the death, then passes the case to GiveLight — accepted, or
+  marked for a person to review — and returns a case reference to give the user.
+  Only call this once the user has sent the certificate AND described what happened
+  (who passed away, roughly when or where). If you have asked for that account twice
+  without getting it, call it anyway. The image is pulled automatically; you do not
+  pass it in.
 input_schema:
   type: object
   properties: {}

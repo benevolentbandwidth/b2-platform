@@ -1,0 +1,46 @@
+# Scoring settings for the death-certificate pipeline.
+#
+# Every verdict records `version`. Bump it whenever you change a value so a
+# decision can always be traced back to the settings that produced it.
+#
+# To try different settings without editing this file, point
+# B2_SCORING_CONFIG at another copy, or pass a ScoringConfig to run_pipeline.
+version: 7
+
+# How much each stage counts toward the 1-100 score. Must add up to 1.0.
+# The document stage is not scored: it only checks the file can be read at
+# all, and a file that cannot be read goes to review instead.
+stage_weights:
+  authenticity: 0.5
+  consistency: 0.5
+
+# Lowest score (inclusive) for each band. Anything below `low` is ESCALATE.
+bands:
+  high: 75
+  medium: 50
+  low: 25
+
+# Bands that are forwarded to GiveLight automatically.
+accept_bands: [high, medium]
+
+consistency:
+  # Model for the story check, which also reads the certificate and writes the
+  # case note for GiveLight.
+  model: gemini-3.8-flash
+  # Vertex location for this call. Gemini 3.x models are only served from
+  # `global`; leave unset to use $VERTEX_LOCATION.
+  location: global
+  # MINIMAL / LOW / MEDIUM / HIGH (Gemini 3 only; leave unset on 2.5). Latency
+  # is almost all thinking: at its default 3.8 Flash took a minute and timed
+  # out; at LOW it matched 2.5 Flash for speed. 3.8 Flash rejects MINIMAL.
+  thinking_level: LOW
+  # If the claimant's story and the certificate match worse than this, the case
+  # goes to a human whatever the overall score is.
+  min_score: 0.3
+  # Per attempt. A normal call at LOW thinking takes 5-12 s and has reached
+  # 22 s; at 30 s Google cut off one slow call in most test runs. This only
+  # cuts off a call Google has stalled, which is then retried. Worst case
+  # before the stage is marked unavailable: attempts x timeout_seconds plus
+  # 1 s between.
+  timeout_seconds: 40
+  attempts: 2
