@@ -1,9 +1,37 @@
+# Recorded on every verdict alongside scoring.yaml's version. Bump it whenever
+# you change anything in this file.
+version: 9
+
 thresholds:
   clear_fail: 0.8
   clear_pass: 0.2
 
+# Any check reporting one of these flags sends the case straight to human
+# review, whatever the overall risk score. Add a flag here to make that signal
+# decisive.
+hard_escalation_flags:
+  - FOUND_ONLINE                 # reverse_image: document already published online
+  - POSSIBLE_STOCK               # reverse_image: matches a stock-image site
+  - SYNTHID_WATERMARK_DETECTED   # synthid: carries Google's AI-generation watermark
+  - CHECKSUM_FAIL                # checksum: a check digit does not validate
+  - INTERNAL_INCONSISTENCY       # gemini_vision: details on the document contradict each other
+
 gemini:
   enabled: true
+  # Model for the Gemini fraud check (gemini_vision). On 16 test certificates
+  # 3.8 Flash at LOW thinking caught 4 of 9 fakes against 2.5 Flash's 1, at
+  # about the same speed and cost.
+  model: gemini-3.8-flash
+  # Gemini 3.x models are only served from `global`. Unset: $VERTEX_LOCATION.
+  location: global
+  # MINIMAL / LOW / MEDIUM / HIGH (Gemini 3 only; leave unset on 2.5). At the
+  # default level 3.8 Flash took a minute and timed out; 3.8 rejects MINIMAL.
+  thinking_level: LOW
+  # Per attempt. A normal call at LOW thinking takes 3-10 s; this only cuts off
+  # a call Google has stalled, which is then retried. Worst case before the
+  # case goes to review: attempts x timeout_seconds plus 1 s between them.
+  timeout_seconds: 30
+  attempts: 2
 
 checks:
   - id: exif
@@ -34,6 +62,11 @@ checks:
   - id: gemini_extract
     enabled: true
     early_exit_on_fail: false
+    params:
+      model: gemini-3.8-flash
+      location: global
+      thinking_level: LOW
+      timeout_seconds: 60
 
   - id: checksum
     enabled: true
@@ -44,8 +77,11 @@ checks:
     enabled: true
     early_exit_on_fail: false
     params:
-      timeout_seconds: 10.0
-      max_retries: 2
+      # Per attempt; a normal Vision call takes 1-3 s. This check runs before
+      # the Gemini fraud check, so its worst case (2 x 6 s + 1 s between) adds
+      # directly to the claimant's wait. Only timeouts, 429 and 5xx are retried.
+      timeout_seconds: 6.0
+      attempts: 2
       stock_domains:
         - shutterstock.com
         - gettyimages.com
@@ -72,9 +108,13 @@ checks:
         - theguardian.com
 
   - id: synthid
-    enabled: true
+    # Off: Google allowlists its Imagen watermark model and this project gets
+    # 403 on every call, so each case uploaded the full image for nothing.
+    # Turn on once Google grants access.
+    enabled: false
     early_exit_on_fail: false
     params:
-      max_retries: 2
+      # Google's Imagen watermark model only exists in us-central1.
+      location: us-central1
       timeout_seconds: 20.0
 

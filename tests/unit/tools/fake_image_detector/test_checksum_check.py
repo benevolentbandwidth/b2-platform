@@ -118,7 +118,13 @@ class TestChecksumCheckIban:
         assert result.normalized_signals.category == "document_authenticity"
         assert result.normalized_signals.indicators == ["CHECKSUM_FAIL"]
 
-    def test_fails_when_iban_not_found_in_text(self, check):
+    def test_skips_when_iban_not_found_in_text(self, check):
+        """Not finding the number is not a failed check digit.
+
+        CHECKSUM_FAIL forces human review, so an unreadable or absent field
+        must skip rather than fail.
+        """
         result = self._run(check, "No IBAN present here")
-        assert result.passed is False
-        assert "IBAN" in result.signals["failed_fields"]
+        assert result.skipped is True
+        assert "CHECKSUM_FAIL" not in result.flags
+        assert result.signals["unread_fields"] == ["IBAN"]

@@ -5,10 +5,19 @@ from tools.fake_image_detector.checks.base_check import BaseCheck
 from tools.fake_image_detector.models import CheckResult, NormalizedSignals
 
 
+# Machine-readable zones (ICAO 9303) appear on passports and ID cards only.
+_MRZ_DOCUMENT_TYPES = {"passport", "national_id"}
+
+
 class MRZCheck(BaseCheck):
     check_id = "mrz"
 
     async def run(self, image_bytes: bytes, context: dict) -> CheckResult:
+        doc_type = context.get("doc_type")
+        if doc_type and doc_type not in _MRZ_DOCUMENT_TYPES:
+            # Not applicable. Running anyway mis-read death-certificate text as a
+            # partial MRZ, reported it as a check that "ran", and cost time.
+            return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
         return await asyncio.to_thread(self._run_sync, image_bytes)
 
     def _run_sync(self, image_bytes: bytes) -> CheckResult:

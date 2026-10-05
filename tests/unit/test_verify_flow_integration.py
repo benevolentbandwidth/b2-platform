@@ -8,6 +8,7 @@ deps threading, and image-through-context path are all exercised for real.
 """
 
 import json
+from src.chat import IMAGE_ARRIVED_PROMPT
 from pathlib import Path
 
 from pydantic_ai.models.test import TestModel
@@ -82,7 +83,7 @@ def test_model_call_pulls_image_and_hands_off(monkeypatch):
 
     with agent.pydantic_ai_agent.override(model=TestModel()):
         session = Session(agent, deps=deps)
-        "".join(session.send_stream("The user has just uploaded a document image."))
+        "".join(session.send_stream(IMAGE_ARRIVED_PROMPT))
 
     # the tool pulled the image for the right session, out of band from the model
     assert store.pulled_for == "wa-1"
@@ -154,7 +155,7 @@ def test_orphan_claim_document_upload_returns_tool_validation_output(monkeypatch
 
     with agent.pydantic_ai_agent.override(model=TestModel(call_tools=["death_certificate_verification"])):
         session = Session(agent, deps=deps)
-        response_text = "".join(session.send_stream("The user has just uploaded a document image."))
+        response_text = "".join(session.send_stream(IMAGE_ARRIVED_PROMPT))
 
     assert store.pulled_for == "wa-orphan-claim-1"
     assert seen["submission"].image == b"\xff\xd8jpeg-death-certificate"

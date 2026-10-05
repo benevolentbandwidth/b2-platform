@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from e2e.payloads import mime_for_path
+from src.session_store import MAX_MEDIA_BYTES
 
 
 class InMemoryStore:
@@ -32,6 +33,10 @@ class InMemoryStore:
         self._history[session_id] = list(history)
 
     def save_media(self, session_id: str, image_bytes: bytes, *, mime_type: str) -> bool:
+        # Same size limit as FirestoreSessionStore, so local runs refuse exactly
+        # what production refuses.
+        if len(image_bytes) > MAX_MEDIA_BYTES:
+            return False
         self._media[session_id] = (image_bytes, mime_type)
         return True
 

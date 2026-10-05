@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
 
 from tools.fake_image_detector.checks.base_check import BaseCheck
+from tools.fake_image_detector.checks.checksum_check import checksum_fields
+from tools.fake_image_detector.file_formats import gemini_payload
+from tools.fake_image_detector.google_clients import gemini_client, request_timeout
+from tools.fake_image_detector.gemini_settings import thinking_config, thinking_level
 from tools.fake_image_detector.models import CheckResult
 
 # Fields to extract per document type, based on what each document typically contains.
@@ -31,25 +36,37 @@ Do not include any text outside the JSON object.\
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def _sniff_mime(image_bytes: bytes) -> str:
-    if image_bytes[:2] == b"\xff\xd8":
-        return "image/jpeg"
-    if image_bytes[:4] == b"\x89PNG":
-        return "image/png"
-    if len(image_bytes) >= 12 and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
-
-
 class GeminiExtractCheck(BaseCheck):
     check_id = "gemini_extract"
 
     def __init__(self, params: dict | None = None, project: str | None = None, location: str | None = None):
+        params = params or {}
         self._project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
-        self._location = location or os.environ.get("VERTEX_LOCATION", "us-central1")
+        self._location = (
+            location or params.get("location") or os.environ.get("VERTEX_LOCATION", "us-central1")
+        )
+        self._timeout_seconds = float(params.get("timeout_seconds", 60.0))
+        # From this check's params in pipeline.yaml, where it is required; the
+        # default only serves direct construction.
+        self._model = str(params.get("model") or "gemini-2.5-flash")
+        self._thinking_level = thinking_level(params.get("thinking_level"), "gemini_extract params")
 
     async def run(self, image_bytes: bytes, context: dict) -> CheckResult:
-        return await asyncio.to_thread(self._run_sync, image_bytes, context)
+        # Without a limit a hung Gemini call stalled the whole verification.
+        # Extraction only gathers information, so a timeout just skips it.
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._run_sync, image_bytes, context),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError:
+            return CheckResult(
+                check=self.check_id,
+                passed=True,
+                confidence=0.0,
+                skipped=True,
+                signals={"reason": f"timed out after {self._timeout_seconds:.0f}s"},
+            )
 
     def _run_sync(self, image_bytes: bytes, context: dict) -> CheckResult:
         doc_type = context.get("doc_type")
@@ -60,9 +77,18 @@ class GeminiExtractCheck(BaseCheck):
         if not fields:
             return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
 
+        # The readings feed only the check-digit check. Without check-digit fields
+        # (death certificates have none) they are thrown away, so the call is
+        # skipped: it cost a paid Gemini call and held up the fraud check behind it.
+        if not checksum_fields(doc_type, context.get("country")):
+            return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True)
+
         try:
-            from google import genai
-            from google.genai import types as gentypes
+            # importlib (not `from google import genai`) so the lookup goes through
+            # sys.modules. Attribute-style import resolves off the already-imported
+            # `google` package and silently bypasses test stubs.
+            genai = importlib.import_module("google.genai")
+            gentypes = importlib.import_module("google.genai.types")
         except ImportError as e:
             return CheckResult(check=self.check_id, passed=True, confidence=0.0, skipped=True, error=str(e))
 
@@ -77,17 +103,23 @@ class GeminiExtractCheck(BaseCheck):
             doc_type=doc_type.replace("_", " "),
             field_list=field_list,
         )
-        model = os.environ.get("VERTEX_MODEL", "gemini-2.5-flash")
+        model = self._model
 
         try:
-            client = genai.Client(
-                vertexai=True, project=self._project, location=self._location
-            )
-            image_part = gentypes.Part.from_bytes(
-                data=image_bytes, mime_type=_sniff_mime(image_bytes)
-            )
+            client = gemini_client(genai, project=self._project, location=self._location)
+            gemini_bytes, gemini_mime = gemini_payload(image_bytes)
+            image_part = gentypes.Part.from_bytes(data=gemini_bytes, mime_type=gemini_mime)
             response = client.models.generate_content(
-                model=model, contents=[image_part, prompt]
+                model=model,
+                contents=[image_part, prompt],
+                # Default temperature: Google advises against lowering it on Gemini 3.
+                config=gentypes.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    thinking_config=thinking_config(gentypes, self._thinking_level),
+                    # The request ends itself on timeout, so a timed-out call does
+                    # not keep holding a worker thread after run() has given up.
+                    http_options=request_timeout(gentypes, self._timeout_seconds),
+                ),
             )
             raw = response.text
         except Exception as e:

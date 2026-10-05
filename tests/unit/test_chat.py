@@ -11,6 +11,7 @@ from pydantic_ai.messages import (
 from src import chat as chat_module
 from src.chat import (
     IMAGE_ARRIVED_PROMPT,
+    IMAGE_TOO_LARGE_PROMPT,
     IMAGE_PROMPT_TEXT,
     _build_prompt,
     _render_history_text,
@@ -184,6 +185,50 @@ def test_chat_threads_debug_events_into_session_context(monkeypatch) -> None:
     assert captured["deps"].debug_events is debug_events
 
 
+def test_the_message_being_answered_reaches_the_verification_tool(monkeypatch) -> None:
+    """Regression: deps were built from the history saved before this turn, so a
+    claimant who sent the certificate and then described the death had that
+    description missing from the check the agent ran in response to it."""
+    captured = {}
+    prior = [
+        ModelRequest(parts=[UserPromptPart(content=chat_module.IMAGE_ARRIVED_PROMPT)]),
+        ModelResponse(parts=[TextPart(content="Thank you. Who passed away, and when?")]),
+    ]
+
+    class FakeStore:
+        def load_history(self, session_id):
+            return prior
+
+        def save_history(self, *args, **kwargs):
+            pass
+
+    class FakeRouter:
+        def route_with_metadata(self, query: str):
+            return object(), {"score": 1.0}
+
+    class FakeSession:
+        def __init__(self, agent: object, history=None, deps=None):
+            captured["deps"] = deps
+            self.history = []
+
+        def send_stream(self, prompt):
+            yield "ok"
+
+    monkeypatch.setattr(chat_module, "load_dotenv", lambda: None)
+    monkeypatch.setattr(chat_module, "_router", None)
+    monkeypatch.setattr(chat_module, "AgentRouter", FakeRouter)
+    monkeypatch.setattr(chat_module, "Session", FakeSession)
+    monkeypatch.setattr(chat_module, "FirestoreSessionStore", FakeStore)
+
+    story = "My father Ahmad died in Takengon in June 2022."
+    chat(text=story, session_id="session-1")
+
+    deps = captured["deps"]
+    assert deps.history_text.splitlines()[-1] == f"user: {story}"
+    assert deps.history_text.splitlines()[0].startswith("system: ")
+    assert deps.claimant_messages == [story]
+
+
 def test_render_history_text_flattens_user_and_assistant_turns() -> None:
     history = [
         ModelRequest(parts=[UserPromptPart(content="my mother passed away")]),
@@ -275,3 +320,74 @@ def test_image_route_query_without_history_uses_document_signal() -> None:
     from src.chat import IMAGE_ROUTING_TEXT, _image_route_query
 
     assert _image_route_query("") == IMAGE_ROUTING_TEXT
+
+
+def test_refused_image_is_reported_as_not_received() -> None:
+    """Regression: a refused save used to be announced as an arrived image, so the
+    agent ran the tool, found nothing and told the claimant nothing was received."""
+
+    class RefusingStore:
+        def save_media(self, session_id: str, image_bytes: bytes, *, mime_type: str) -> bool:
+            return False
+
+    prompt, _ = chat_module._prepare_turn(
+        text=None,
+        image_bytes=b"\xff\xd8 too big",
+        image_url=None,
+        image_media_type="image/jpeg",
+        history_text="",
+        store=RefusingStore(),
+        session_id="wa-1",
+    )
+
+    assert prompt == IMAGE_TOO_LARGE_PROMPT
+    assert "NOT received" in prompt
+    assert "Do not call the verification tool" in prompt
+
+
+def test_claimant_messages_are_the_users_own_words_verbatim() -> None:
+    """GiveLight gets what the claimant actually wrote, not just an AI summary."""
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+    history = [
+        ModelRequest(parts=[UserPromptPart(content="My brother passed away.")]),
+        ModelResponse(parts=[TextPart(content="I am so sorry. What happened?")]),
+        ModelRequest(parts=[UserPromptPart(content="He died in Jakarta.\nI am his sister.")]),
+    ]
+
+    assert chat_module._claimant_messages(history) == [
+        "My brother passed away.",
+        "He died in Jakarta.\nI am his sister.",
+    ]
+
+
+
+def test_system_notices_are_never_counted_as_the_claimants_words() -> None:
+    """Image turns are stored as notices; a second upload used to put
+    "[System notice ...]" into GiveLight's verbatim claimant messages."""
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    history = [
+        ModelRequest(parts=[UserPromptPart(content="My brother died in Jakarta.")]),
+        ModelRequest(parts=[UserPromptPart(content=chat_module.IMAGE_ARRIVED_PROMPT)]),
+        ModelRequest(parts=[UserPromptPart(content="The user has just uploaded a document image.")]),
+        ModelRequest(parts=[UserPromptPart(content=chat_module.IMAGE_TOO_LARGE_PROMPT)]),
+        ModelRequest(parts=[UserPromptPart(content="Here is a clearer photo.")]),
+    ]
+
+    assert chat_module._claimant_messages(history) == [
+        "My brother died in Jakarta.",
+        "Here is a clearer photo.",
+    ]
+    rendered = chat_module._render_history_text(history)
+    assert "user: My brother died in Jakarta." in rendered
+    assert not any(
+        line.startswith("user: [System notice") or line == "user: The user has just uploaded a document image."
+        for line in rendered.splitlines()
+    )
+
+
+def test_too_large_notice_is_worded_as_an_internal_notice() -> None:
+    """Plain prose addressed to the agent was echoed to claimants."""
+    assert chat_module.IMAGE_TOO_LARGE_PROMPT.startswith("[System notice, not from the user")
+    assert "do not repeat it" in chat_module.IMAGE_TOO_LARGE_PROMPT

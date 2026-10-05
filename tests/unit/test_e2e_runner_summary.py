@@ -58,3 +58,13 @@ def test_run_case_adds_summary_tool_response_without_replacing_tool_summary(monk
     assert result["final_response"] == "verification passed"
     assert captured["result"]["tool_result"]["summary"] == "Original verification summary."
     assert "summary_tool_response" not in captured["result"]
+
+
+def test_local_store_refuses_what_production_refuses() -> None:
+    """The e2e harness must not accept files production would drop."""
+    from e2e.local_app import InMemoryStore
+    from src.session_store import MAX_MEDIA_BYTES
+
+    store = InMemoryStore()
+    assert store.save_media("s", b"x" * MAX_MEDIA_BYTES, mime_type="image/png") is True
+    assert store.save_media("s", b"x" * (MAX_MEDIA_BYTES + 1), mime_type="image/png") is False

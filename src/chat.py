@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
 from .orchestrator.context import SessionContext
 from .router import AgentRouter
 from .session import Session
-from .session_store import FirestoreSessionStore
+from .session_store import MAX_MEDIA_BYTES, FirestoreSessionStore
 
 load_dotenv()
 
@@ -25,7 +25,25 @@ IMAGE_PROMPT_TEXT = "The user sent this image on WhatsApp. Analyze it and provid
 IMAGE_ROUTING_TEXT = "A WhatsApp user uploaded a document image such as a death certificate for verification."
 # Text notice given to the model when an image arrives. The image bytes go to the
 # transient store (for tools to pull), never into the model's prompt.
-IMAGE_ARRIVED_PROMPT = "The user has just uploaded a document image."
+# Worded as an internal notice: quoted in the agent's instructions as plain
+# prose, the model began sending it to claimants as its reply.
+IMAGE_ARRIVED_PROMPT = (
+    "[System notice, not from the user: a document image has just been uploaded "
+    "and stored for verification. This notice is for you only; do not repeat it.]"
+)
+IMAGE_TOO_LARGE_PROMPT = (
+    "[System notice, not from the user: they tried to send a document, but the file "
+    f"was over {MAX_MEDIA_BYTES // 1_000_000} MB, so it was NOT received. This notice is "
+    "for you only; do not repeat it. Do not call the verification tool. Kindly ask "
+    "them to send it again as a smaller file, for example as a normal photo rather "
+    "than as a document, or a screenshot of the certificate.]"
+)
+# Image turns reach the model, and so the stored history, as these notices.
+# They are not the claimant's words. The legacy text is still present in
+# sessions saved before the notices were reworded.
+_SYSTEM_NOTICES = frozenset(
+    {IMAGE_ARRIVED_PROMPT, IMAGE_TOO_LARGE_PROMPT, "The user has just uploaded a document image."}
+)
 # Tail of prior conversation kept alongside IMAGE_ROUTING_TEXT when routing an image turn.
 IMAGE_ROUTING_HISTORY_CHARS = 400
 
@@ -41,10 +59,27 @@ def _render_history_text(history: Sequence[ModelMessage] | None) -> str:
             if not isinstance(content, str) or not content.strip():
                 continue
             if isinstance(part, UserPromptPart):
-                lines.append(f"user: {content.strip()}")
+                # A notice is labelled as such, so nothing reading "user:" lines
+                # (the consistency check) mistakes it for the claimant.
+                role = "system" if content.strip() in _SYSTEM_NOTICES else "user"
+                lines.append(f"{role}: {content.strip()}")
             elif isinstance(part, TextPart):
                 lines.append(f"assistant: {content.strip()}")
     return "\n".join(lines)
+
+
+def _claimant_messages(history: Sequence[ModelMessage] | None) -> list[str]:
+    """The user's own text messages, verbatim and in order (no assistant text)."""
+    messages: list[str] = []
+    for message in history or []:
+        for part in getattr(message, "parts", []):
+            content = getattr(part, "content", None)
+            if not (isinstance(part, UserPromptPart) and isinstance(content, str)):
+                continue
+            text = content.strip()
+            if text and text not in _SYSTEM_NOTICES:
+                messages.append(text)
+    return messages
 
 
 def _get_router() -> AgentRouter:
@@ -69,6 +104,7 @@ def chat(
     store = FirestoreSessionStore() if session_id is not None else None
     history = store.load_history(session_id) if store is not None else None
     history_text = _render_history_text(history)
+    claimant_messages = _claimant_messages(history)
 
     prompt, route_query = _prepare_turn(
         text=text,
@@ -80,6 +116,14 @@ def chat(
         session_id=session_id,
     )
 
+    # The tool reads the conversation from deps, not from the agent's own view of
+    # it, so the message being answered must be added here. Without it, a
+    # claimant who sent the certificate first and then their account had that
+    # account missing from the very turn the agent ran the check in.
+    if text is not None and text.strip():
+        history_text = "\n".join(filter(None, [history_text, f"user: {text.strip()}"]))
+        claimant_messages = [*claimant_messages, text.strip()]
+
     router = _get_router()
     agent, _metadata = router.route_with_metadata(route_query)
     deps = SessionContext(
@@ -87,6 +131,7 @@ def chat(
         store=store,
         history_text=history_text,
         debug_events=debug_events,
+        claimant_messages=claimant_messages,
     )
     session = Session(agent, history=history, deps=deps)
 
@@ -125,7 +170,10 @@ def _prepare_turn(
         if not image_bytes:
             raise ValueError("image_bytes must not be empty")
         if store is not None and session_id is not None:
-            store.save_media(session_id, image_bytes, mime_type=image_media_type)
+            if not store.save_media(session_id, image_bytes, mime_type=image_media_type):
+                # Telling the agent it arrived made it run the tool, find nothing
+                # and tell the claimant no document had been received.
+                return IMAGE_TOO_LARGE_PROMPT, _image_route_query(history_text)
         return IMAGE_ARRIVED_PROMPT, _image_route_query(history_text)
 
     if text is not None:

@@ -75,6 +75,8 @@ class AuthenticitySignal(BaseModel):
     """
 
     result: ToolResult
+    # pipeline.yaml version the detector ran with.
+    config_version: int | None = None
     stage: str = "authenticity"
 
     model_config = {"arbitrary_types_allowed": True}
@@ -90,6 +92,17 @@ class ConsistencySignal(BaseModel):
     """
 
     consistency_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # False when the stage could not run at all (no credentials, or the call
+    # raised). Distinguishes "no evidence" from a genuine score of 0.0, which
+    # otherwise both read as a perfect contradiction worth 0 points.
+    available: bool = True
+    # False when the claimant never described the death, so there was nothing
+    # to compare the certificate with. Extracted fields are still kept.
+    claimant_account_present: bool = True
+    # From the claimant's own messages: relationship, dependants, other details.
+    claimant: dict[str, Any] = Field(default_factory=dict)
+    # Short plain-language note for a GiveLight caseworker.
+    case_note: str = ""
     consistency_label: str = "unknown"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     extracted_fields: dict[str, Any] = Field(default_factory=dict)
@@ -115,6 +128,9 @@ class ReliabilityResult(BaseModel):
     band: Band
     sub_scores: dict[str, float] = Field(default_factory=dict)
     weights: dict[str, float] = Field(default_factory=dict)
+    # Settings versions that produced this verdict:
+    # {"scoring": scoring.yaml version, "detector": pipeline.yaml version}.
+    config_versions: dict[str, int | None] = Field(default_factory=dict)
     flags: list[str] = Field(default_factory=list)
     justification: str
     extracted_fields: dict[str, Any] = Field(default_factory=dict)
@@ -123,3 +139,7 @@ class ReliabilityResult(BaseModel):
     matches: list[str] = Field(default_factory=list)
     mismatches: list[str] = Field(default_factory=list)
     uncertain_points: list[str] = Field(default_factory=list)
+    # Story-check output that used to be dropped before the handoff.
+    story_summary: str = ""
+    claimant: dict[str, Any] = Field(default_factory=dict)
+    case_note: str = ""

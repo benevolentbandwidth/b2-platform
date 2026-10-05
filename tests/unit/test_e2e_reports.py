@@ -52,6 +52,10 @@ def test_render_markdown_includes_summary_tool_response_column() -> None:
         "Escalation | Early Exit | Early Exit Reason | Final Response Chars | "
         "Summary Tool Response | Errors |"
     ) in markdown
+    assert "| Scope | Total | Classified | Accuracy | FP | FN |" in markdown
+    assert "| --- | ---: | ---: | ---: | ---: | ---: |" in markdown
+    assert "| `overall` | 1 | 1 | 0.0% | 0 | 1 |" in markdown
+    assert "| Scope | Total | Classified | Accuracy | FP | FN | Unknown |" not in markdown
     assert (
         "| `example/real/case_001` | FAIL | accept | reject | FN | FLAG | 0.2 | "
         "HUMAN_REVIEW | Yes | ocr_document runtime error \\| unavailable | 9 | "

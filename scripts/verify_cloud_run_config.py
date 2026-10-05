@@ -88,6 +88,7 @@ def main() -> int:
 
     for name in config.get("required_env", []):
         if not any(e.get("name") == name and e.get("value") for e in env):
+            failures.append(f"missing required env var: {name}")
 
     for name in config.get("required_secrets", []):
         if name not in names:

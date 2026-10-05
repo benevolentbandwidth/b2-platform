@@ -146,3 +146,30 @@ class TestOCRDocumentCheckDetection:
             _remove_mock_tesseract()
 
         assert context["doc_type"] == "birth_certificate"
+
+
+def test_detects_indonesia_and_morocco():
+    """The two countries this platform serves were never detected."""
+    from tools.fake_image_detector.checks.ocr_document_check import OCRDocumentCheck
+
+    check = OCRDocumentCheck()
+    assert check._detect_country("kutipan akta kematian republik indonesia") == "ID"
+    assert check._detect_country("royaume du maroc extrait d'acte de deces") == "MA"
+
+
+def test_a_given_document_type_is_kept_and_country_still_detected():
+    """The death-certificate pipeline states the type. A passport keyword on the
+    page must not overwrite it, and an Arabic/French certificate with none of
+    the English keywords must still be treated as a death certificate."""
+    from tools.fake_image_detector.checks.ocr_document_check import OCRDocumentCheck
+
+    for text in ("passport number A1234567 royaume du maroc", "royaume du maroc acte de deces"):
+        _install_mock_tesseract(text)
+        try:
+            context = {"input_type": "document", "doc_type": "death_certificate"}
+            run(OCRDocumentCheck().run(_jpeg_bytes(), context))
+        finally:
+            _remove_mock_tesseract()
+
+        assert context["doc_type"] == "death_certificate"
+        assert context["country"] == "MA"

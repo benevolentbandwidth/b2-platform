@@ -5,9 +5,22 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+import pytest
 from PIL import Image
 
+from tools.fake_image_detector.checks import checksum_check
+from tools.fake_image_detector.checks import gemini_extract_check as extract_module
 from tools.fake_image_detector.checks.gemini_extract_check import GeminiExtractCheck
+
+
+@pytest.fixture(autouse=True)
+def _a_check_digit_field_needs_the_readings(monkeypatch):
+    """Extraction only runs when a check-digit field will use its readings. The
+    shipped schemas define one only for bank statements, so these tests stand
+    one in for every document type."""
+    monkeypatch.setattr(
+        extract_module, "checksum_fields", lambda doc_type, country: [{"name": "N", "checksum": "luhn"}]
+    )
 
 
 def run(coro):
@@ -179,3 +192,37 @@ class TestGeminiExtractCheckExtraction:
 
         assert result.skipped is True
         assert context["extracted_fields"]["full_name"] == "Test User"
+
+
+def test_a_hung_extraction_times_out_and_skips(monkeypatch):
+    """No limit used to mean a hung Gemini call stalled the whole verification."""
+    import time
+
+    from tools.fake_image_detector.checks.gemini_extract_check import GeminiExtractCheck
+
+    check = GeminiExtractCheck(params={"timeout_seconds": 0.05}, project="p")
+    monkeypatch.setattr(check, "_run_sync", lambda image_bytes, context: time.sleep(0.5))
+
+    import asyncio
+
+    result = asyncio.run(check.run(b"img", {"doc_type": "death_certificate"}))
+
+    assert result.skipped is True
+    assert "timed out" in result.signals["reason"]
+
+
+def test_death_certificates_are_not_extracted_since_nothing_uses_the_readings(monkeypatch):
+    """Their readings fed only the check-digit check, which has no fields for a
+    death certificate: a paid call whose answer was thrown away, ahead of the
+    fraud check."""
+    monkeypatch.setattr(extract_module, "checksum_fields", checksum_check.checksum_fields)
+    mock_client = _install_mock_genai("{}")
+    try:
+        result = run(GeminiExtractCheck(project="test").run(
+            _jpeg_bytes(), {"doc_type": "death_certificate", "country": "ID"}
+        ))
+    finally:
+        _remove_mock_genai()
+
+    assert result.skipped is True
+    mock_client.models.generate_content.assert_not_called()

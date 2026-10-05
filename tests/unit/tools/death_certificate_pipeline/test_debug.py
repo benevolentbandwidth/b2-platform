@@ -50,6 +50,7 @@ def test_build_verification_debug_event_includes_bounded_authenticity_details() 
         "checks": [
             {
                 "check": "ocr_document",
+                "status": "error: provider unavailable",
                 "passed": False,
                 "skipped": False,
                 "fake_score": 0.2,
@@ -73,3 +74,28 @@ def test_build_verification_debug_event_omits_authenticity_when_unavailable() ->
     )
 
     assert "authenticity" not in event
+
+
+def test_each_check_says_plainly_whether_it_ran():
+    """Six identical "skipped: true" lines used to hide three different situations."""
+    from tools.death_certificate_pipeline.debug import check_status
+    from tools.fake_image_detector.models import CheckResult
+
+    def status(**kw):
+        return check_status(CheckResult(check="c", **kw))
+
+    assert status(passed=True, fake_score=0.1, confidence=0.9) == "passed"
+    assert status(passed=False, fake_score=0.8, confidence=0.9) == "flagged"
+    assert status(passed=True, skipped=True, signals={"doc_type": "death_certificate"}) == (
+        "ran (information only, not scored)"
+    )
+    assert status(passed=True, skipped=True) == "not applicable to this document"
+    assert status(passed=True, skipped=True, signals={"reason": "no access"}) == "unavailable: no access"
+    # An unavailable check reports its own error, not a guess at the cause.
+    timed_out = status(passed=True, skipped=True, flags=["REVERSE_SEARCH_UNAVAILABLE", "CHECK_TIMEOUT"],
+                       signals={"error": "Google Vision reverse search timed out"})
+    assert timed_out == "unavailable: Google Vision reverse search timed out"
+    switched_off = status(passed=True, skipped=True, flags=["REVERSE_SEARCH_UNAVAILABLE"],
+                          signals={"errors": ["503 unavailable", "403 Vision API has not been used"]})
+    assert switched_off == "unavailable: 403 Vision API has not been used"
+    assert status(passed=True, skipped=True, flags=["REVERSE_SEARCH_UNAVAILABLE"]) == "unavailable"

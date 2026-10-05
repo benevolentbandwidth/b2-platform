@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,7 +34,17 @@ from .whatsapp_media import download_media
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="b2 WhatsApp Adapter")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Google clients are shared per process; creating them here, before any
+    # request, keeps credential discovery out of the first claimant's turn.
+    from tools.death_certificate_pipeline.pipeline import warm_up_google_clients
+
+    await run_in_threadpool(warm_up_google_clients)
+    yield
+
+
+app = FastAPI(title="b2 WhatsApp Adapter", lifespan=_lifespan)
 
 _WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 _ALLOW_OPEN_WEBHOOK = os.getenv("ALLOW_UNAUTHENTICATED_WEBHOOK", "")
@@ -168,7 +179,7 @@ async def message_endpoint(
             debug_events=debug_events,
         )
         logger.info("api.message done wa_id=%s response_chars=%d", message.wa_id, len(response))
-        await _send_summary_tool_response(message, message.wa_id, response, debug_events)
+        await _send_summary_tool_response(message, response, debug_events)
         if debug_enabled:
             return _debug_response(response, message, debug_events or [])
         return {"response": response}
@@ -189,7 +200,7 @@ async def message_endpoint(
             debug_events=debug_events,
         )
         logger.info("api.message done wa_id=%s response_chars=%d", message.wa_id, len(response))
-        await _send_summary_tool_response(message, message.wa_id, response, debug_events)
+        await _send_summary_tool_response(message, response, debug_events)
         if debug_enabled:
             return _debug_response(response, message, debug_events or [])
         return {"response": response}
@@ -207,7 +218,6 @@ def health() -> dict[str, str]:
 
 async def _send_summary_tool_response(
     message: InboundMessage,
-    session_id: str,
     response: str,
     debug_events: list[dict[str, Any]],
 ) -> None:
@@ -219,7 +229,6 @@ async def _send_summary_tool_response(
     summary = await generate_summary_tool_response(
         final_response=response,
         tool_events=debug_events,
-        session_id=session_id
     )
     if not summary:
         return

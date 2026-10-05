@@ -19,12 +19,14 @@ Mocking strategy:
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tools.death_certificate_pipeline.config_loader import default_scoring_config
 from tools.death_certificate_pipeline.models import (
     AuthenticitySignal,
     Band,
@@ -265,11 +267,12 @@ class TestRunPipeline:
         assert result.band in list(Band)
 
     @pytest.mark.asyncio
-    async def test_sub_scores_has_three_stage_keys(
+    async def test_sub_scores_has_the_scored_stage_keys(
         self, minimal_submission, mock_pipeline_stages
     ) -> None:
+        # The document stage is a pass/fail gate and is not scored.
         result = await run_pipeline(minimal_submission)
-        assert set(result.sub_scores) == {"document", "authenticity", "consistency"}
+        assert set(result.sub_scores) == {"authenticity", "consistency"}
 
     @pytest.mark.asyncio
     async def test_weights_sum_to_one(
@@ -366,29 +369,34 @@ class TestScorerEscalation:
 
     @pytest.mark.asyncio
     async def test_low_scores_produce_low_band(self) -> None:
-        doc  = DocumentSignal(legible=False)             # doc_score = 0.3
+        doc  = DocumentSignal(legible=True)
         auth = AuthenticitySignal(result=ToolResult(
             verdict=Verdict.FLAG, risk_score=0.6,        # auth_score = 0.4
             escalation=Escalation.AUTO_ACCEPT, checks=[],
         ))
         con  = ConsistencySignal(consistency_score=0.2)  # con_score = 0.2
-        result = await _stage_score(doc, auth, con)
-        # 0.3×0.2 + 0.4×0.4 + 0.2×0.4 = 0.06+0.16+0.08 = 0.30 → score=30 → LOW
+        # Opt out of the consistency minimum: this tests the band cutoffs.
+        no_minimum = dataclasses.replace(default_scoring_config(), consistency_min_score=0.0)
+        result = await _stage_score(doc, auth, con, no_minimum)
+        # 0.4×0.5 + 0.2×0.5 = 0.20+0.10 = 0.30 → score=30 → LOW
         assert result.band == Band.LOW
         assert result.score == 30
 
     @pytest.mark.asyncio
     async def test_very_low_scores_produce_escalate_band(self) -> None:
-        doc  = DocumentSignal(legible=False)             # 0.3
+        doc  = DocumentSignal(legible=True)
         auth = AuthenticitySignal(result=ToolResult(
             verdict=Verdict.FLAG, risk_score=0.9,        # 0.1
             escalation=Escalation.AUTO_ACCEPT, checks=[],
         ))
-        con  = ConsistencySignal(consistency_score=0.0)  # 0.0
-        result = await _stage_score(doc, auth, con)
-        # 0.3×0.2 + 0.1×0.4 + 0.0×0.4 = 0.06+0.04+0.0 = 0.10 → score=10 → ESCALATE
+        con  = ConsistencySignal(consistency_score=0.05)  # 0.05
+        # Opt out of the consistency minimum so ESCALATE comes from the score.
+        no_minimum = dataclasses.replace(default_scoring_config(), consistency_min_score=0.0)
+        result = await _stage_score(doc, auth, con, no_minimum)
+        # 0.1×0.5 + 0.05×0.5 = 0.075 → score=8 → ESCALATE (no flags involved)
+        assert result.flags == []
         assert result.band == Band.ESCALATE
-        assert result.score == 10
+        assert result.score == 8
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ class ConversationSummaryTool:
     async def run(
         self,
         messages: Sequence[ModelMessage],
-        uuid: str
+        case_reference: str | None = None,
     ) -> str:
         transcript = self._build_transcript(messages)
 
@@ -29,7 +29,7 @@ class ConversationSummaryTool:
             audit_store=self._audit_store,
         )
 
-        return await self._summarize(scrubbed)
+        return await self._summarize(scrubbed, case_reference)
 
     def _build_transcript(
         self,
@@ -43,8 +43,17 @@ class ConversationSummaryTool:
     async def _summarize(
         self,
         scrubbed_conversation: str,
-        uuid: str
+        case_reference: str | None = None,
     ) -> str:
+        # Added after scrubbing so the scrubber cannot mangle it, and only when
+        # a case exists. Never the session id: that is the claimant's phone
+        # number, which the scrubbing step exists to keep out of this prompt.
+        reference_rule = (
+            f"- Include this case reference exactly as written, so the user can "
+            f"quote it: {case_reference}\n"
+            if case_reference
+            else ""
+        )
         prompt = f"""
             Summarize the following conversation history.
 
@@ -56,16 +65,13 @@ class ConversationSummaryTool:
                 • Completed work
                 • Remaining work
                 • Important tool calls, if relevant
-                • UUID of the conversation
             - Maximum 200 words.
             - Do not speculate.
             - Return plain text.
-            - UUID is absolutely essential to the summary and must be included. 
-
+            {reference_rule}
             Conversation:
 
             {scrubbed_conversation}
-            UUID : {uuid}
         """
 
         result = await self._agent.run(prompt)
