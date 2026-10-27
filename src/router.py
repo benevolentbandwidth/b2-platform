@@ -155,8 +155,31 @@ class AgentRouter:
 			unchanged,
 		)
 
-	def route_with_metadata(self, query: str) -> tuple[agent_module.Agent, dict[str, str | float]]:
-		"""Return the routed agent plus the match metadata."""
+	def route_with_metadata(
+		self,
+		query: str,
+		current_agent: Optional[str] = None,
+	) -> tuple[agent_module.Agent, dict[str, str | float | bool]]:
+		"""Return the routed agent plus the match metadata.
+
+		A conversation whose current agent is sticky stays with it. Each message
+		is otherwise routed on its own, and a claimant's short follow-ups ("he was
+		my dad", a date and place) scored closer to the general agent than to the
+		intake agent, moving the claim to an agent that cannot handle it.
+		"""
+		if current_agent:
+			record = next((r for r in self.store.all_agents() if r.name == current_agent), None)
+			if record is not None:
+				agent = self._load_agent_for_record(record)
+				if agent.definition.sticky:
+					logger.info("router.route sticky name=%s", record.name)
+					return agent, {
+						"name": record.name,
+						"description": record.description,
+						"yaml_path": record.yaml_path,
+						"sticky": True,
+					}
+
 		start = perf_counter()
 		embed_start = perf_counter()
 		query_embedding = self.embedder.embed_query(query)

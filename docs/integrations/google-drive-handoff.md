@@ -1,12 +1,21 @@
-# Google Drive handoff
+# GiveLight handoff
 
 Every case where the claimant sent a document is uploaded to GiveLight as two
 files: the original document and a JSON payload. There is no review queue on
 the B2 side — GiveLight's reviewers are the human review — so cases that were
-not automatically accepted are uploaded too, marked as needing review. The
-destination should be a folder in a Google Shared Drive.
+not automatically accepted are uploaded too, marked as needing review.
 
-## Reading the folder
+B2 uploads each case to a Cloud Storage staging bucket. GiveLight's own Apps
+Script ([`integrations/givelight-drive-automation`](../../integrations/givelight-drive-automation/README.md))
+moves each complete case into GiveLight's private Drive folder, emails
+GiveLight, and deletes the case from the bucket. B2 never has access to
+GiveLight's Drive, and GiveLight's authorization never leaves its script.
+
+B2 does not upload to Drive itself because Google gives service accounts no
+Drive storage: a service account cannot create files in a My Drive folder, only
+in a Shared Drive. Files the script creates belong to GiveLight's account.
+
+## Reading a case
 
 - **Two kinds of case**, by `decision` in the JSON and in the file name:
   - `death-certificate-accepted-<reference>` — cleared automatic acceptance.
@@ -17,7 +26,7 @@ destination should be a folder in a Google Shared Drive.
 - **`case_reference`** (e.g. `DC-7F3A-9C21-B4E8`) is also given to the claimant,
   so a case can be found by searching Drive for the number they quote.
 - **A JSON file means a complete case.** The document is uploaded first and the
-  JSON last, so a JSON only appears once its document is already in the folder.
+  JSON last, so a JSON only appears once its document is already in the bucket.
   The JSON names its document in `image_file`; a document with no matching
   JSON is an interrupted upload (logged as `handoff.incomplete`) and can be
   ignored. The claimant is asked to resend when an upload fails.
@@ -30,46 +39,27 @@ destination should be a folder in a Google Shared Drive.
 - Rarely, a network retry can upload the same file twice. Copies share a name
   and belong to the same case.
 
-## Google Cloud and GiveLight setup
+## Google Cloud setup
 
-1. Enable the Google Drive API in the Google Cloud project that runs the B2
-   WhatsApp adapter.
-2. Use the Cloud Run runtime service account through Application Default
-   Credentials (ADC). Do not create or send a service-account JSON key.
-3. Ask GiveLight to share the destination Shared Drive folder with the runtime
-   service-account email and grant it permission to add files.
-4. Copy the folder ID from its Drive URL and set it on the service as
-   `GOOGLE_DRIVE_FOLDER_ID`.
-5. Deploy a revision and verify that one accepted case creates both the JSON
-   payload and original document in the destination folder.
+1. Create the staging bucket (one per service, e.g. one for staging and one for
+   production) with public access prevention, uniform bucket-level access, soft
+   delete off, and a lifecycle rule deleting objects older than 7 days. See the
+   automation README for why each matters.
+2. Grant the Cloud Run runtime service account
+   `b2-platform-app-service@b2-platform.iam.gserviceaccount.com`
+   **Storage Object Creator** on the bucket, and nothing else. B2 uploads
+   create-only (`ifGenerationMatch=0`), so it can add a case but never read,
+   replace or delete one. It authenticates through Application Default
+   Credentials; do not create or send a service-account JSON key.
+3. Grant GiveLight's automation account **Storage Object Admin** on the bucket.
+4. Set the bucket name on the service as `GIVELIGHT_HANDOFF_BUCKET`.
+5. Have GiveLight set up the Apps Script, then verify that one case lands in
+   the bucket and then in GiveLight's folder.
 
 The uploader requests only the
-`https://www.googleapis.com/auth/drive.file` OAuth scope. Store configuration in
-the deployment platform; never commit credentials or secret values.
-
-## Optional GiveLight private-folder automation
-
-If B2 should upload only to a shared staging folder, GiveLight can own a
-standalone Apps Script that copies complete JSON/document pairs into a private
-GiveLight folder and then sends a notification email. This keeps the private
-folder and email authority under GiveLight's Google account; the B2 service
-account needs access only to the staging folder.
-
-See the
-[`integrations/givelight-drive-automation`](../../integrations/givelight-drive-automation/README.md)
-setup guide and reference implementation. The automation polls once per minute,
-validates and processes batches of up to 10 pairs, copies both files before
-sending email, and trashes the staging copies only after notification succeeds.
-Resumable Script Properties prevent ordinary retries from repeating completed
-steps, though an interruption between an external Drive or email operation and
-its state write can still cause a duplicate.
-
-Run the script as a dedicated GiveLight automation account with access only to
-the staging and destination folders. Restrict staging writers to the B2 runtime
-service account and designated GiveLight administrators, and grant the
-automation account permission to trash staging files. Filename, size, and JSON
-schema checks do not provide cryptographic provenance; the reference workflow
-does not implement a signed manifest or HMAC.
+`https://www.googleapis.com/auth/devstorage.read_write` OAuth scope; the
+bucket's IAM limits it to creating objects. Store configuration in the
+deployment platform; never commit credentials or secret values.
 
 ## WhatsApp configuration
 

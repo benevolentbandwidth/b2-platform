@@ -80,6 +80,35 @@ def test_load_history_deserializes_stored_messages() -> None:
     assert store.load_history("session-1") == history
 
 
+def test_load_session_returns_history_and_the_agent_that_last_answered() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    history = [ModelRequest(parts=[UserPromptPart(content="hello")])]
+    data = {
+        "history": ModelMessagesTypeAdapter.dump_python(history, mode="json"),
+        "agent_name": "death_certificate_poc_agent",
+        "expires_at": now + timedelta(hours=1),
+    }
+    store = FirestoreSessionStore(
+        client=FakeClient(FakeDocument(FakeSnapshot(True, data))),
+        server_timestamp="SERVER_TIME",
+        now=lambda: now,
+    )
+
+    assert store.load_session("session-1") == (history, "death_certificate_poc_agent")
+
+
+def test_load_session_of_an_expired_conversation_has_no_agent() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    data = {"history": [], "agent_name": "death_certificate_poc_agent", "expires_at": now - timedelta(seconds=1)}
+    store = FirestoreSessionStore(
+        client=FakeClient(FakeDocument(FakeSnapshot(True, data))),
+        server_timestamp="SERVER_TIME",
+        now=lambda: now,
+    )
+
+    assert store.load_session("session-1") == ([], None)
+
+
 def test_load_history_returns_empty_list_and_deletes_expired_document() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     document = FakeDocument(

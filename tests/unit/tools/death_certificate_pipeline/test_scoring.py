@@ -204,16 +204,30 @@ async def test_unreadable_document_goes_to_review_and_earns_no_points():
     assert unreadable.sub_scores == {}
 
 
-async def test_missing_claimant_account_goes_to_review_with_its_own_reason():
+async def test_missing_claimant_account_is_neutral():
+    """A short message is not evidence against the certificate: scoring it as a
+    0 sent clean certificates to review."""
     result = await _stage_score(
         DocumentSignal(legible=True),
         _auth(0.05),
         ConsistencySignal(consistency_score=0.0, available=False, claimant_account_present=False),
     )
 
+    assert result.flags == []
+    assert result.sub_scores == {"authenticity": 0.95}
+    assert result.score == 95
+    assert result.band is Band.HIGH
+
+
+async def test_missing_claimant_account_does_not_hide_a_fraud_flag():
+    result = await _stage_score(
+        DocumentSignal(legible=True),
+        _auth(0.85, escalation=Escalation.HUMAN_REVIEW),
+        ConsistencySignal(consistency_score=0.0, available=False, claimant_account_present=False),
+    )
+
+    assert result.flags == ["HARD_ESCALATION"]
     assert result.band is Band.ESCALATE
-    assert "NO_CLAIMANT_ACCOUNT" in result.flags
-    assert "CONSISTENCY_UNAVAILABLE" not in result.flags  # one reason, the precise one
 
 
 async def test_an_unreadable_file_is_never_sent_to_gemini(monkeypatch):

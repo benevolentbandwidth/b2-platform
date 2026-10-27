@@ -76,7 +76,7 @@ def test_chat_routes_and_returns_streamed_text(monkeypatch) -> None:
     created_sessions = []
 
     class FakeRouter:
-        def route_with_metadata(self, query: str):
+        def route_with_metadata(self, query: str, current_agent=None):
             assert query == "hello"
             return object(), {"score": 1.0}
 
@@ -114,14 +114,16 @@ def test_chat_loads_and_saves_stateful_history(monkeypatch) -> None:
         name = "support"
 
     class FakeRouter:
-        def route_with_metadata(self, query: str):
+        def route_with_metadata(self, query: str, current_agent=None):
             assert query == "hello"
+            # The agent that last answered is handed to the router.
+            assert current_agent == "intake"
             return FakeAgent(), {"score": 1.0}
 
     class FakeStore:
-        def load_history(self, session_id: str):
+        def load_session(self, session_id: str):
             assert session_id == "session-1"
-            return loaded_history
+            return loaded_history, "intake"
 
         def save_history(self, session_id: str, history, *, agent_name=None, channel=None) -> None:
             saved["session_id"] = session_id
@@ -160,7 +162,7 @@ def test_chat_threads_debug_events_into_session_context(monkeypatch) -> None:
     captured = {}
 
     class FakeRouter:
-        def route_with_metadata(self, query: str):
+        def route_with_metadata(self, query: str, current_agent=None):
             return object(), {"score": 1.0}
 
     class FakeSession:
@@ -196,14 +198,14 @@ def test_the_message_being_answered_reaches_the_verification_tool(monkeypatch) -
     ]
 
     class FakeStore:
-        def load_history(self, session_id):
-            return prior
+        def load_session(self, session_id):
+            return prior, None
 
         def save_history(self, *args, **kwargs):
             pass
 
     class FakeRouter:
-        def route_with_metadata(self, query: str):
+        def route_with_metadata(self, query: str, current_agent=None):
             return object(), {"score": 1.0}
 
     class FakeSession:
@@ -248,14 +250,14 @@ def test_chat_image_turn_stores_media_and_hides_image_from_model(monkeypatch) ->
         name = "death_certificate_poc_agent"
 
     class FakeRouter:
-        def route_with_metadata(self, query: str):
+        def route_with_metadata(self, query: str, current_agent=None):
             captured["route_query"] = query
             return FakeAgent(), {"score": 1.0}
 
     class FakeStore:
-        def load_history(self, session_id: str):
+        def load_session(self, session_id: str):
             # prior conversation establishes the death-certificate context
-            return [ModelRequest(parts=[UserPromptPart(content="my mother passed away")])]
+            return [ModelRequest(parts=[UserPromptPart(content="my mother passed away")])], None
 
         def save_media(self, session_id: str, image_bytes: bytes, *, mime_type: str) -> bool:
             saved_media["session_id"] = session_id

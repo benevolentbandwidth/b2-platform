@@ -308,6 +308,15 @@ async def test_message_text_debug_header_without_env_returns_normal_response(mon
     assert response == {"response": "ok"}
 
 
+_VERIFICATION_EVENT = {
+    "tool": "death_certificate_verification",
+    "accepted": True,
+    "handed_off": True,
+    "summary": "Verification passed.",
+    "flags": [],
+}
+
+
 async def test_message_text_sends_summary_tool_response_as_second_message(monkeypatch):
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
@@ -365,10 +374,12 @@ async def test_message_text_skips_summary_when_outbound_is_not_configured(monkey
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
     monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+    monkeypatch.setattr(api_module, "_SEND_SUMMARY_MESSAGE", "true")
 
     called = {"summary": False}
 
     def fake_chat(*, text, session_id, debug_events=None, **kwargs):
+        debug_events.append(_VERIFICATION_EVENT)
         return "ok"
 
     async def fake_generate_summary(*, final_response, tool_events):
@@ -390,10 +401,12 @@ async def test_message_text_keeps_original_response_when_summary_generation_fail
     import src.api as api_module
     monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
     monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+    monkeypatch.setattr(api_module, "_SEND_SUMMARY_MESSAGE", "true")
 
     sent = {"called": False}
 
     def fake_chat(*, text, session_id, debug_events=None, **kwargs):
+        debug_events.append(_VERIFICATION_EVENT)
         return "ok"
 
     async def fake_generate_summary(*, final_response, tool_events):
@@ -577,3 +590,34 @@ async def test_message_does_not_send_summary_when_gate_is_off(monkeypatch):
 
     assert response["response"] == "ok"
     assert sent == []
+
+
+async def test_message_skips_summary_on_a_turn_without_verification(monkeypatch):
+    """With nothing verified there is no outcome to tell. Asked to summarise a
+    question such as "who passed away, and when?", the summary model sent
+    "we've safely received the death certificate" instead and dropped it."""
+    import src.api as api_module
+    monkeypatch.setattr(api_module, "_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(api_module, "_ALLOW_OPEN_WEBHOOK", "true")
+    monkeypatch.setattr(api_module, "_SEND_SUMMARY_MESSAGE", "true")
+
+    called = []
+
+    async def fake_generate_summary(*, final_response, tool_events):
+        called.append("summary")
+        return "summary"
+
+    async def fake_send_text_message(*, wa_id, text, phone_number_id=None):
+        called.append("send")
+        return True
+
+    monkeypatch.setattr(api_module, "chat", lambda *, text, **kw: "Who passed away, and when?")
+    monkeypatch.setattr(api_module, "run_in_threadpool", _run_direct)
+    monkeypatch.setattr(api_module, "can_send_text_message", lambda **kw: True)
+    monkeypatch.setattr(api_module, "generate_summary_tool_response", fake_generate_summary)
+    monkeypatch.setattr(api_module, "send_text_message", fake_send_text_message)
+
+    response = await api_module.message_endpoint(FakeRequest(SAMPLE_TEXT_PAYLOAD))
+
+    assert response == {"response": "Who passed away, and when?"}
+    assert called == []

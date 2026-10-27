@@ -247,12 +247,15 @@ async def _stage_score(
     auth_score = round(1.0 - auth.result.risk_score, 3)
     con_score  = con.consistency_score
 
-    sub_scores: dict[str, float] = {
-        "authenticity": auth_score,
-        "consistency":  round(con_score, 3),
-    }
-
-    weighted  = sum(sub_scores[k] * w for k, w in cfg.stage_weights.items())
+    sub_scores: dict[str, float] = {"authenticity": auth_score}
+    if con.claimant_account_present:
+        sub_scores["consistency"] = round(con_score, 3)
+    # With no account from the claimant there is nothing to compare, which is
+    # neither for nor against the certificate: the score comes from the stages
+    # that had evidence. Counting it as 0 sent clean certificates to review
+    # only because the claimant's message was short.
+    weights = {k: w for k, w in cfg.stage_weights.items() if k in sub_scores}
+    weighted  = sum(sub_scores[k] * w for k, w in weights.items()) / sum(weights.values())
     raw_score = max(1, min(100, round(weighted * 100)))
     flags:    list[str] = []
 
@@ -269,8 +272,9 @@ async def _stage_score(
         # reviewer sees the whole picture.
         if auth.result.escalation in (Escalation.HUMAN_REVIEW, Escalation.AUTO_REJECT):
             flags.append("HARD_ESCALATION")
+        # No claimant account adds no flag: it is neutral (see sub_scores above).
         if not con.claimant_account_present:
-            flags.append("NO_CLAIMANT_ACCOUNT")
+            pass
         elif not con.available:
             # The consistency stage never ran. Its 0.0 is absence of evidence,
             # not a contradiction — scoring it as one still cleared MEDIUM and

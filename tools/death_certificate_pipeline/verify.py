@@ -138,11 +138,6 @@ def _review_reasons(
         reasons.append("the file could not be read as an image or PDF")
     if "HARD_ESCALATION" in result.flags and authenticity is not None:
         reasons.extend(_authenticity_reasons(authenticity))
-    if "NO_CLAIMANT_ACCOUNT" in result.flags:
-        reasons.append(
-            "the claimant has not described what happened, so there was nothing "
-            "to compare the certificate with"
-        )
     if "CONSISTENCY_UNAVAILABLE" in result.flags:
         reasons.append("the claimant's account could not be compared with the certificate")
     if "CONSISTENCY_BELOW_MINIMUM" in result.flags:

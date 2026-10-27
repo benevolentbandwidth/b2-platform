@@ -17,10 +17,14 @@ class InMemoryStore:
 
     def __init__(self) -> None:
         self._history: dict[str, list[Any]] = {}
+        self._agent: dict[str, str | None] = {}
         self._media: dict[str, tuple[bytes, str]] = {}
 
     def load_history(self, session_id: str) -> list[Any]:
         return list(self._history.get(session_id, []))
+
+    def load_session(self, session_id: str) -> tuple[list[Any], str | None]:
+        return self.load_history(session_id), self._agent.get(session_id)
 
     def save_history(
         self,
@@ -31,6 +35,8 @@ class InMemoryStore:
         channel: str | None = None,
     ) -> None:
         self._history[session_id] = list(history)
+        if agent_name is not None:
+            self._agent[session_id] = agent_name
 
     def save_media(self, session_id: str, image_bytes: bytes, *, mime_type: str) -> bool:
         # Same size limit as FirestoreSessionStore, so local runs refuse exactly

@@ -102,7 +102,7 @@ def chat(
     """Route one WhatsApp text or image message through the agent loop and return the response."""
 
     store = FirestoreSessionStore() if session_id is not None else None
-    history = store.load_history(session_id) if store is not None else None
+    history, current_agent = store.load_session(session_id) if store is not None else (None, None)
     history_text = _render_history_text(history)
     claimant_messages = _claimant_messages(history)
 
@@ -125,7 +125,7 @@ def chat(
         claimant_messages = [*claimant_messages, text.strip()]
 
     router = _get_router()
-    agent, _metadata = router.route_with_metadata(route_query)
+    agent, _metadata = router.route_with_metadata(route_query, current_agent=current_agent)
     deps = SessionContext(
         session_id=session_id,
         store=store,

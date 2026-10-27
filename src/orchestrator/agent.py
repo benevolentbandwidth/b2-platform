@@ -35,6 +35,8 @@ class AgentDefinition:
     skills: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     provider: dict[str, Any] = field(default_factory=dict)
+    # Once this agent answers a conversation, it keeps answering it (see AgentRouter).
+    sticky: bool = False
 
 
 def _load_agent_definition_from_file(agent_file: Path) -> AgentDefinition:
@@ -64,6 +66,7 @@ def _load_agent_definition_from_file(agent_file: Path) -> AgentDefinition:
         skills=agent_data.get("skills", []) or [],
         tools=agent_data.get("tools", []) or [],
         provider=provider,
+        sticky=bool(agent_data.get("sticky", False)),
     )
 
 

@@ -4,12 +4,12 @@
   "b2-whatsapp-adapter": {
     "required_env": ["GOOGLE_CLOUD_PROJECT", "VERTEX_LOCATION"],
     "required_secrets": ["WEBHOOK_SECRET"],
-    "warn_env": ["GOOGLE_DRIVE_FOLDER_ID"]
+    "warn_env": ["GIVELIGHT_HANDOFF_BUCKET"]
   },
 
   "b2-whatsapp-adapter-staging": {
     "required_env": ["GOOGLE_CLOUD_PROJECT", "VERTEX_LOCATION"],
     "required_secrets": ["WEBHOOK_SECRET"],
-    "warn_env": ["GOOGLE_DRIVE_FOLDER_ID"]
+    "warn_env": ["GIVELIGHT_HANDOFF_BUCKET"]
   }
 }

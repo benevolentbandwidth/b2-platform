@@ -5,7 +5,7 @@
 #
 # To try different settings without editing this file, point
 # B2_SCORING_CONFIG at another copy, or pass a ScoringConfig to run_pipeline.
-version: 7
+version: 8
 
 # How much each stage counts toward the 1-100 score. Must add up to 1.0.
 # The document stage is not scored: it only checks the file can be read at

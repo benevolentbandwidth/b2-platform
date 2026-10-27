@@ -9,7 +9,8 @@ Invariants:
 - A failed turn returns 200 with a user-facing fallback, never an unhandled 500,
   because the caller retries on error and turns have no idempotency key.
 - The caller delivers the agent response. b2 only sends its own WhatsApp message
-  when WHATSAPP_SEND_SUMMARY is truthy, otherwise the user gets two messages.
+  when WHATSAPP_SEND_SUMMARY is truthy (otherwise the user gets two messages),
+  and then only on a turn that verified a certificate.
 
 Env: WEBHOOK_SECRET, ALLOW_UNAUTHENTICATED_WEBHOOK, WHATSAPP_SEND_SUMMARY,
 ENABLE_E2E_DEBUG.
@@ -28,7 +29,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .chat import chat
 from .router import BelowThresholdError
-from .summary_response import generate_summary_tool_response
+from .summary_response import death_certificate_verification, generate_summary_tool_response
 from .whatsapp_outbound import can_send_text_message, send_text_message
 from .whatsapp_media import download_media
 
@@ -222,6 +223,12 @@ async def _send_summary_tool_response(
     debug_events: list[dict[str, Any]],
 ) -> None:
     if not _truthy(_SEND_SUMMARY_MESSAGE):
+        return
+    # The summary tells the claimant a verification outcome. On any other turn
+    # there is none, and the summary model made one up: asked to rewrite "who
+    # passed away, and when?" it sent "we've safely received the death
+    # certificate, let me know how I can support you", dropping the question.
+    if death_certificate_verification(debug_events) is None:
         return
     if not can_send_text_message(wa_id=message.wa_id, phone_number_id=message.phone_number_id):
         return

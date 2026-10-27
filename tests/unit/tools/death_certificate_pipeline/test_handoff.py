@@ -1,4 +1,4 @@
-"""Tests for the Google Drive GiveLight handoff."""
+"""Tests for the GiveLight handoff upload to Cloud Storage."""
 
 import json
 
@@ -8,16 +8,16 @@ import pytest
 from tools.death_certificate_pipeline import handoff
 
 
-async def test_missing_folder_configuration_returns_false(monkeypatch):
-    monkeypatch.delenv("GOOGLE_DRIVE_FOLDER_ID", raising=False)
+async def test_missing_bucket_configuration_returns_false(monkeypatch):
+    monkeypatch.delenv("GIVELIGHT_HANDOFF_BUCKET", raising=False)
 
     assert await handoff.deliver_to_gl({}, b"image", "image/jpeg") is False
 
 
 async def test_uploads_json_and_original_image(monkeypatch):
-    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "give-light-folder")
+    monkeypatch.setenv("GIVELIGHT_HANDOFF_BUCKET", "give-light-bucket")
 
-    monkeypatch.setattr(handoff, "_get_access_token", lambda: "drive-token")
+    monkeypatch.setattr(handoff, "_get_access_token", lambda: "storage-token")
     monkeypatch.setattr(
         handoff,
         "uuid4",
@@ -27,6 +27,8 @@ async def test_uploads_json_and_original_image(monkeypatch):
     requests = []
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -54,22 +56,15 @@ async def test_uploads_json_and_original_image(monkeypatch):
     assert await handoff.deliver_to_gl(payload, b"jpeg-bytes", "image/jpeg") is True
     assert len(requests) == 2
 
-    metadata = []
-    contents = []
     for url, kwargs in requests:
-        assert url == handoff._DRIVE_UPLOAD_URL
-        assert kwargs["params"] == {"uploadType": "multipart", "supportsAllDrives": "true"}
-        assert kwargs["headers"]["Authorization"] == "Bearer drive-token"
-        content_type = kwargs["headers"]["Content-Type"]
-        assert content_type.startswith("multipart/related; boundary=")
-        boundary = content_type.split("boundary=", 1)[1].encode()
-        _, remainder = kwargs["content"].split(b"\r\n\r\n", 1)
-        raw_metadata, remainder = remainder.split(b"\r\n--" + boundary + b"\r\n", 1)
-        metadata.append(json.loads(raw_metadata))
-        contents.append(remainder.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0])
+        assert url == "https://storage.googleapis.com/upload/storage/v1/b/give-light-bucket/o"
+        assert kwargs["headers"]["Authorization"] == "Bearer storage-token"
+        # Create-only: B2 can never overwrite an object already in the bucket.
+        assert kwargs["params"]["uploadType"] == "media"
+        assert kwargs["params"]["ifGenerationMatch"] == "0"
 
-    # Document first, JSON last: a JSON in the folder means a complete case.
-    image_name, json_name = metadata[0]["name"], metadata[1]["name"]
+    # Document first, JSON last: a JSON in the bucket means a complete case.
+    image_name, json_name = (kwargs["params"]["name"] for _, kwargs in requests)
     assert json_name == "death-certificate-12345678-1234-5678-1234-567812345678.json"
     assert image_name == "death-certificate-12345678-1234-5678-1234-567812345678.jpg"
     assert "aaaaaaaaaaaaaaaa" not in json_name
@@ -77,20 +72,19 @@ async def test_uploads_json_and_original_image(monkeypatch):
     assert "2026-08-07" not in json_name
     assert "2026-08-07" not in image_name
     assert json_name.removesuffix(".json") == image_name.removesuffix(".jpg")
-    assert metadata[0]["parents"] == metadata[1]["parents"] == ["give-light-folder"]
-    assert metadata[0]["mimeType"] == "image/jpeg"
-    assert metadata[1]["mimeType"] == "application/json"
-    assert contents[0] == b"jpeg-bytes"
-    assert json.loads(contents[1]) == {**payload, "image_file": image_name}
+    assert requests[0][1]["headers"]["Content-Type"] == "image/jpeg"
+    assert requests[1][1]["headers"]["Content-Type"] == "application/json"
+    assert requests[0][1]["content"] == b"jpeg-bytes"
+    assert json.loads(requests[1][1]["content"]) == {**payload, "image_file": image_name}
 
 
 async def test_file_extension_comes_from_the_bytes(monkeypatch):
     """TIFF used to upload as .bin; and the bytes outrank a wrong declared type."""
-    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "give-light-folder")
-    monkeypatch.setattr(handoff, "_get_access_token", lambda: "drive-token")
+    monkeypatch.setenv("GIVELIGHT_HANDOFF_BUCKET", "give-light-bucket")
+    monkeypatch.setattr(handoff, "_get_access_token", lambda: "storage-token")
     uploads = []
 
-    async def capture(client, token, folder_id, name, content, mime_type):
+    async def capture(client, token, bucket, name, content, mime_type):
         uploads.append((name, mime_type))
 
     monkeypatch.setattr(handoff, "_upload_file", capture)
@@ -102,13 +96,13 @@ async def test_file_extension_comes_from_the_bytes(monkeypatch):
     assert image_mime == "image/tiff"
 
 
-# --- retries, ordering and the multipart boundary ---------------------------
+# --- retries and ordering ----------------------------------------------------
 
 
 
 def _response(status: int, text: str = "") -> httpx.Response:
     return httpx.Response(
-        status, text=text, request=httpx.Request("POST", handoff._DRIVE_UPLOAD_URL)
+        status, text=text, request=httpx.Request("POST", handoff._STORAGE_UPLOAD_URL.format(bucket="b"))
     )
 
 
@@ -134,17 +128,17 @@ def no_wait(monkeypatch):
 
 
 async def _upload(client):
-    await handoff._upload_file(client, "tok", "folder", "x.jpg", b"data", "image/jpeg")
+    await handoff._upload_file(client, "tok", "bucket", "x.jpg", b"data", "image/jpeg")
 
 
 @pytest.mark.parametrize(
     "script",
     [
         [503, 429, 200],
-        [(403, '{"error": {"errors": [{"reason": "userRateLimitExceeded"}]}}'), 200],
+        [408, 200],
         [httpx.ConnectError("connection reset"), 200],
     ],
-    ids=["server-and-quota", "drive-rate-limit-403", "network"],
+    ids=["server-and-quota", "request-timeout", "network"],
 )
 async def test_temporary_failures_are_retried(no_wait, script):
     client = _ScriptedClient(script)
@@ -152,9 +146,10 @@ async def test_temporary_failures_are_retried(no_wait, script):
     assert len(client.calls) == len(script)
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 412])
 async def test_permanent_failures_are_not_retried(no_wait, status):
-    """A 404 (folder not shared) or plain 403 will not fix itself; fail fast."""
+    """A 404 (no such bucket), 403 (no write access) or a name already taken on
+    the first attempt will not fix itself; fail fast."""
     client = _ScriptedClient([status])
     with pytest.raises(httpx.HTTPStatusError):
         await _upload(client)
@@ -168,16 +163,18 @@ async def test_gives_up_after_the_last_attempt(no_wait):
     assert len(client.calls) == 3
 
 
-def test_boundary_is_random_per_upload():
-    first, _ = handoff._multipart_body({}, b"x", "image/jpeg")
-    second, _ = handoff._multipart_body({}, b"x", "image/jpeg")
-    assert first != second
+async def test_a_retry_that_finds_its_object_already_uploaded_succeeds(no_wait):
+    """The first attempt landed but its response was lost; the retry is refused
+    as a duplicate name, which means the file is already there in full."""
+    client = _ScriptedClient([httpx.ReadTimeout("response lost"), 412])
+    await _upload(client)
+    assert len(client.calls) == 2
 
 
 async def test_json_failure_after_document_leaves_no_complete_case(monkeypatch, no_wait, caplog):
     """Document lands, JSON fails: report failure, and flag the stray document."""
-    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "give-light-folder")
-    monkeypatch.setattr(handoff, "_get_access_token", lambda: "drive-token")
+    monkeypatch.setenv("GIVELIGHT_HANDOFF_BUCKET", "give-light-bucket")
+    monkeypatch.setattr(handoff, "_get_access_token", lambda: "storage-token")
     scripted = _ScriptedClient([200, 400])
 
     class Client:

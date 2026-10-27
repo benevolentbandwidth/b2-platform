@@ -14,7 +14,7 @@ Last verified directly against both live services: 2026-09-24.
 | `GOOGLE_CLOUD_PROJECT` | plain env, value `benevolent-bandwidth` | yes | Drives both Vertex AI and Firestore. Without it the router fails on the first inbound message. |
 | `VERTEX_LOCATION` | plain env, value `us-east1` | yes | Code defaults to `us-central1` if unset — silently wrong for this org. |
 | `WEBHOOK_SECRET` | Secret Manager reference, secret `webhook-secret`, version `latest` | yes | `/message` returns 503 if this is unset at all, and 401 on every call if it's wrong. Never set as a plain value — the check fails the build if it finds one. |
-| `GOOGLE_DRIVE_FOLDER_ID` | plain env | not yet set on either service | Without it, the GiveLight handoff silently no-ops on an accepted case — no error, just nothing delivered. Flagged as a warning, not a build failure, until someone decides on prod vs. a separate staging folder. |
+| `GIVELIGHT_HANDOFF_BUCKET` | plain env | warning only | The Cloud Storage bucket GiveLight's Apps Script collects cases from (see `docs/integrations/google-drive-handoff.md`). Without it, the handoff logs `handoff.skipped` and the claimant is told there was a technical problem; nothing reaches GiveLight. Flagged as a warning, not a build failure. Replaces `GOOGLE_DRIVE_FOLDER_ID`, which the code no longer reads. |
 
 `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are deliberately absent from
 both services as plain env vars. `src/gcp_secrets.py` falls back to the

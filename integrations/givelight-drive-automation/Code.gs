@@ -13,10 +13,11 @@ const HANDOFF_STATE_PREFIX = "HANDOFF_STATE_";
 const MAX_HANDOFFS_PER_RUN = 10;
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
+const STORAGE_API = "https://storage.googleapis.com/storage/v1/b/";
 
 /**
- * Copies complete handoff pairs into GiveLight's private folder, sends a
- * notification, and then removes the staging copies.
+ * Saves complete handoff pairs from the staging bucket into GiveLight's private
+ * folder, sends a notification, and then deletes the staging objects.
  */
 function processHandoffs() {
   const lock = LockService.getScriptLock();
@@ -26,7 +27,7 @@ function processHandoffs() {
 
   try {
     const properties = PropertiesService.getScriptProperties();
-    const stagingFolderId = getRequiredProperty_(properties, "STAGING_FOLDER_ID");
+    const stagingBucket = getRequiredProperty_(properties, "STAGING_BUCKET");
     const destinationFolderId = getRequiredProperty_(
       properties,
       "DESTINATION_FOLDER_ID",
@@ -38,9 +39,9 @@ function processHandoffs() {
     const notificationSubject =
       properties.getProperty("NOTIFICATION_SUBJECT") ||
       "GiveLight Drive handoff completed";
-    assertFolderAccessible_(stagingFolderId);
     assertFolderAccessible_(destinationFolderId);
     const config = {
+      stagingBucket: stagingBucket,
       destinationFolderId: destinationFolderId,
       notificationEmails: notificationEmails,
       notificationSubject: notificationSubject,
@@ -48,9 +49,9 @@ function processHandoffs() {
     };
 
     const pendingStates = loadPendingStates_(properties);
-    const knownJsonIds = {};
+    const knownJsonNames = {};
     pendingStates.forEach(function (state) {
-      knownJsonIds[state.sourceJsonId] = true;
+      knownJsonNames[state.sourceJsonName] = true;
     });
 
     const pendingLimit = Math.floor(MAX_HANDOFFS_PER_RUN / 2);
@@ -60,7 +61,7 @@ function processHandoffs() {
     });
 
     const available = MAX_HANDOFFS_PER_RUN - pendingToAttempt.length;
-    findCompleteHandoffs_(stagingFolderId, knownJsonIds)
+    findCompleteHandoffs_(stagingBucket, knownJsonNames)
       .slice(0, available)
       .forEach(function (handoff) {
         const state = createState_(handoff);
@@ -106,39 +107,42 @@ function processStateSafely_(state, config) {
 }
 
 function processState_(state, config) {
+  const bucket = config.stagingBucket;
   if (!state.validated) {
-    const sourceJson = getFileMetadata_(state.sourceJsonId);
-    const sourceDocument = getFileMetadata_(state.sourceDocumentId);
-    validateState_(state, sourceJson, sourceDocument);
+    const sourceJson = getObjectMetadata_(
+      bucket,
+      state.sourceJsonName,
+      state.sourceJsonGeneration,
+    );
+    const sourceDocument = getObjectMetadata_(
+      bucket,
+      state.sourceDocumentName,
+      state.sourceDocumentGeneration,
+    );
+    validateState_(state, bucket, sourceJson, sourceDocument);
     state.validated = true;
     saveState_(config.properties, state);
   }
 
-  if (!state.destinationJsonCopyId) {
-    const sourceJson = getFileMetadata_(state.sourceJsonId);
-    const jsonCopy = Drive.Files.copy(
-      {
-        name: sourceJson.name,
-        parents: [config.destinationFolderId],
-      },
-      sourceJson.id,
-      { supportsAllDrives: true, fields: "id" },
+  // Files are created by this script's account, so they are owned by
+  // GiveLight and use its storage.
+  if (!state.destinationJsonFileId) {
+    state.destinationJsonFileId = saveObjectToFolder_(
+      bucket,
+      state.sourceJsonName,
+      state.sourceJsonGeneration,
+      config.destinationFolderId,
     );
-    state.destinationJsonCopyId = jsonCopy.id;
     saveState_(config.properties, state);
   }
 
-  if (!state.destinationDocumentCopyId) {
-    const sourceDocument = getFileMetadata_(state.sourceDocumentId);
-    const documentCopy = Drive.Files.copy(
-      {
-        name: sourceDocument.name,
-        parents: [config.destinationFolderId],
-      },
-      sourceDocument.id,
-      { supportsAllDrives: true, fields: "id" },
+  if (!state.destinationDocumentFileId) {
+    state.destinationDocumentFileId = saveObjectToFolder_(
+      bucket,
+      state.sourceDocumentName,
+      state.sourceDocumentGeneration,
+      config.destinationFolderId,
     );
-    state.destinationDocumentCopyId = documentCopy.id;
     saveState_(config.properties, state);
   }
 
@@ -148,19 +152,23 @@ function processState_(state, config) {
     saveState_(config.properties, state);
   }
 
-  if (!state.sourceJsonTrashed) {
-    trashFile_(state.sourceJsonId);
-    state.sourceJsonTrashed = true;
+  if (!state.sourceJsonDeleted) {
+    deleteObject_(bucket, state.sourceJsonName, state.sourceJsonGeneration);
+    state.sourceJsonDeleted = true;
     saveState_(config.properties, state);
   }
 
-  if (!state.sourceDocumentTrashed) {
-    trashFile_(state.sourceDocumentId);
-    state.sourceDocumentTrashed = true;
+  if (!state.sourceDocumentDeleted) {
+    deleteObject_(
+      bucket,
+      state.sourceDocumentName,
+      state.sourceDocumentGeneration,
+    );
+    state.sourceDocumentDeleted = true;
     saveState_(config.properties, state);
   }
 
-  config.properties.deleteProperty(stateKey_(state.sourceJsonId));
+  config.properties.deleteProperty(stateKey_(state.sourceJsonName));
 }
 
 function sendNotification_(config) {
@@ -179,23 +187,27 @@ function sendNotification_(config) {
       "A GiveLight Drive handoff completed.",
       "",
       "Timestamp: " + timestamp,
-      "Files copied: 2 (verification JSON and source document)",
+      "Files saved: 2 (verification JSON and source document)",
       "Destination folder: " + destinationFolderUrl,
     ].join("\n"),
   });
 }
 
 function createState_(handoff) {
+  // An object is pinned by name and generation, so a later object reusing the
+  // name is never mistaken for this one.
   return {
     stem: handoff.stem,
-    sourceJsonId: handoff.jsonFile.id,
-    sourceDocumentId: handoff.documentFile.id,
+    sourceJsonName: handoff.jsonObject.name,
+    sourceJsonGeneration: handoff.jsonObject.generation,
+    sourceDocumentName: handoff.documentObject.name,
+    sourceDocumentGeneration: handoff.documentObject.generation,
     validated: false,
-    destinationJsonCopyId: null,
-    destinationDocumentCopyId: null,
+    destinationJsonFileId: null,
+    destinationDocumentFileId: null,
     notificationSent: false,
-    sourceJsonTrashed: false,
-    sourceDocumentTrashed: false,
+    sourceJsonDeleted: false,
+    sourceDocumentDeleted: false,
     lastAttemptAt: null,
   };
 }
@@ -214,10 +226,12 @@ function loadPendingStates_(properties) {
         if (
           !state ||
           !state.stem ||
-          !state.sourceJsonId ||
-          !state.sourceDocumentId ||
+          !state.sourceJsonName ||
+          !state.sourceJsonGeneration ||
+          !state.sourceDocumentName ||
+          !state.sourceDocumentGeneration ||
           typeof state.validated !== "boolean" ||
-          key !== stateKey_(state.sourceJsonId)
+          key !== stateKey_(state.sourceJsonName)
         ) {
           throw new Error("Invalid handoff state.");
         }
@@ -241,18 +255,18 @@ function loadPendingStates_(properties) {
 
 function saveState_(properties, state) {
   properties.setProperty(
-    stateKey_(state.sourceJsonId),
+    stateKey_(state.sourceJsonName),
     JSON.stringify(state),
   );
 }
 
-function stateKey_(sourceJsonId) {
-  return HANDOFF_STATE_PREFIX + sourceJsonId;
+function stateKey_(sourceJsonName) {
+  return HANDOFF_STATE_PREFIX + sourceJsonName;
 }
 
-function validateState_(state, jsonFile, documentFile) {
-  const jsonName = splitFileName_(jsonFile.name);
-  const documentName = splitFileName_(documentFile.name);
+function validateState_(state, bucket, jsonObject, documentObject) {
+  const jsonName = splitFileName_(jsonObject.name);
+  const documentName = splitFileName_(documentObject.name);
   if (
     state.stem.indexOf(HANDOFF_STEM_PREFIX) !== 0 ||
     jsonName.stem !== state.stem ||
@@ -262,14 +276,17 @@ function validateState_(state, jsonFile, documentFile) {
   ) {
     throw new Error("Unexpected handoff filename.");
   }
-  if (Number(jsonFile.size) > MAX_JSON_BYTES) {
+  if (Number(jsonObject.size) > MAX_JSON_BYTES) {
     throw new Error("Verification JSON is too large.");
   }
-  if (Number(documentFile.size) > MAX_DOCUMENT_BYTES) {
+  if (Number(documentObject.size) > MAX_DOCUMENT_BYTES) {
     throw new Error("Source document is too large.");
   }
 
-  const payload = JSON.parse(downloadFileText_(jsonFile.id));
+  const payload = JSON.parse(
+    downloadObject_(bucket, jsonObject.name, jsonObject.generation)
+      .getDataAsString("UTF-8"),
+  );
   if (
     !payload ||
     typeof payload.schema_version !== "string" ||
@@ -292,13 +309,13 @@ function splitFileName_(name) {
   };
 }
 
-function findCompleteHandoffs_(folderId, excludedJsonIds) {
-  const jsonFilesByStem = {};
-  const documentFilesByStem = {};
-  const files = listFilesInFolder_(folderId);
+function findCompleteHandoffs_(bucket, excludedJsonNames) {
+  const jsonObjectsByStem = {};
+  const documentObjectsByStem = {};
+  const objects = listObjects_(bucket);
 
-  files.forEach(function (file) {
-    const name = file.name;
+  objects.forEach(function (object) {
+    const name = object.name;
     const extensionMatch = name.match(/\.([^.]+)$/);
 
     if (!extensionMatch) {
@@ -312,60 +329,112 @@ function findCompleteHandoffs_(folderId, excludedJsonIds) {
     }
 
     if (extension === "json") {
-      addFileByStem_(jsonFilesByStem, stem, file);
+      addFileByStem_(jsonObjectsByStem, stem, object);
     } else if (DOCUMENT_EXTENSIONS.indexOf(extension) !== -1) {
-      addFileByStem_(documentFilesByStem, stem, file);
+      addFileByStem_(documentObjectsByStem, stem, object);
     }
   });
 
-  return Object.keys(jsonFilesByStem)
+  return Object.keys(jsonObjectsByStem)
     .filter(function (stem) {
       return (
-        jsonFilesByStem[stem].length === 1 &&
-        !excludedJsonIds[jsonFilesByStem[stem][0].id] &&
-        documentFilesByStem[stem] &&
-        documentFilesByStem[stem].length === 1
+        jsonObjectsByStem[stem].length === 1 &&
+        !excludedJsonNames[jsonObjectsByStem[stem][0].name] &&
+        documentObjectsByStem[stem] &&
+        documentObjectsByStem[stem].length === 1
       );
     })
     .sort()
     .map(function (stem) {
       return {
         stem: stem,
-        jsonFile: jsonFilesByStem[stem][0],
-        documentFile: documentFilesByStem[stem][0],
+        jsonObject: jsonObjectsByStem[stem][0],
+        documentObject: documentObjectsByStem[stem][0],
       };
     });
 }
 
-function listFilesInFolder_(folderId) {
-  const files = [];
+function listObjects_(bucket) {
+  const objects = [];
   let pageToken;
 
   do {
-    const options = {
-      q: "'" + folderId + "' in parents and trashed = false",
-      spaces: "drive",
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
-      fields: "nextPageToken,files(id,name,size)",
-    };
+    let url =
+      STORAGE_API +
+      encodeURIComponent(bucket) +
+      "/o?fields=" +
+      encodeURIComponent("nextPageToken,items(name,size,generation)");
     if (pageToken) {
-      options.pageToken = pageToken;
+      url += "&pageToken=" + encodeURIComponent(pageToken);
     }
 
-    const response = Drive.Files.list(options);
-    Array.prototype.push.apply(files, response.files || []);
+    const response = JSON.parse(storageFetch_(url, "get").getContentText());
+    Array.prototype.push.apply(objects, response.items || []);
     pageToken = response.nextPageToken;
   } while (pageToken);
 
-  return files;
+  return objects;
 }
 
-function getFileMetadata_(fileId) {
-  return Drive.Files.get(fileId, {
-    supportsAllDrives: true,
-    fields: "id,name,size",
+function objectUrl_(bucket, name) {
+  return (
+    STORAGE_API + encodeURIComponent(bucket) + "/o/" + encodeURIComponent(name)
+  );
+}
+
+function getObjectMetadata_(bucket, name, generation) {
+  const url =
+    objectUrl_(bucket, name) +
+    "?generation=" +
+    encodeURIComponent(generation) +
+    "&fields=name,size,generation";
+  return JSON.parse(storageFetch_(url, "get").getContentText());
+}
+
+function downloadObject_(bucket, name, generation) {
+  const url =
+    objectUrl_(bucket, name) +
+    "?alt=media&generation=" +
+    encodeURIComponent(generation);
+  return storageFetch_(url, "get").getBlob().setName(name);
+}
+
+function saveObjectToFolder_(bucket, name, generation, folderId) {
+  const blob = downloadObject_(bucket, name, generation);
+  const file = Drive.Files.create(
+    { name: name, parents: [folderId], mimeType: blob.getContentType() },
+    blob,
+    { supportsAllDrives: true, fields: "id" },
+  );
+  return file.id;
+}
+
+function deleteObject_(bucket, name, generation) {
+  const url =
+    objectUrl_(bucket, name) + "?generation=" + encodeURIComponent(generation);
+  // Already gone (a previous run deleted it, or the bucket's age rule did).
+  storageFetch_(url, "delete", [404]);
+}
+
+/**
+ * Calls the Cloud Storage JSON API as this script's account. Throws on any
+ * status other than 2xx or one listed in allowedStatuses.
+ */
+function storageFetch_(url, method, allowedStatuses) {
+  const response = UrlFetchApp.fetch(url, {
+    method: method,
+    headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true,
   });
+  const status = response.getResponseCode();
+  if (
+    (status < 200 || status >= 300) &&
+    (allowedStatuses || []).indexOf(status) === -1
+  ) {
+    // The status alone: error bodies can echo object names.
+    throw new Error("Cloud Storage request failed with status " + status + ".");
+  }
+  return response;
 }
 
 function assertFolderAccessible_(folderId) {
@@ -376,27 +445,6 @@ function assertFolderAccessible_(folderId) {
   if (folder.mimeType !== "application/vnd.google-apps.folder") {
     throw new Error("Configured Drive ID is not a folder.");
   }
-}
-
-function downloadFileText_(fileId) {
-  const url =
-    "https://www.googleapis.com/drive/v3/files/" +
-    encodeURIComponent(fileId) +
-    "?alt=media&supportsAllDrives=true";
-  return UrlFetchApp.fetch(url, {
-    headers: {
-      Authorization: "Bearer " + ScriptApp.getOAuthToken(),
-    },
-  }).getContentText("UTF-8");
-}
-
-function trashFile_(fileId) {
-  Drive.Files.update(
-    { trashed: true },
-    fileId,
-    null,
-    { supportsAllDrives: true, fields: "id,trashed" },
-  );
 }
 
 function addFileByStem_(filesByStem, stem, file) {

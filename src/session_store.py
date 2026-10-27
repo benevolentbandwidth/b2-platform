@@ -30,9 +30,10 @@ DEFAULT_SESSION_TTL = timedelta(hours=72)
 # image up to this size fits in one document. Larger images are split into
 # pieces of this size.
 MEDIA_CHUNK_BYTES = 700_000
-# Largest image accepted. Matches WhatsApp's photo limit and the 5 MB ceiling of
-# Drive's multipart upload used for the GiveLight handoff: anything bigger would
-# pass verification and then fail to reach GiveLight.
+# Largest image accepted. Matches WhatsApp's photo limit, and stays well under
+# the 20 MB document limit of GiveLight's handoff script
+# (integrations/givelight-drive-automation): anything bigger would pass
+# verification and then never reach GiveLight.
 MAX_MEDIA_BYTES = 5_000_000
 
 
@@ -61,19 +62,23 @@ class FirestoreSessionStore:
         self._now = now or _utc_now
 
     def load_history(self, session_id: str) -> list[ModelMessage]:
+        return self.load_session(session_id)[0]
+
+    def load_session(self, session_id: str) -> tuple[list[ModelMessage], str | None]:
+        """The stored history and the name of the agent that last answered."""
         document = self._document(session_id)
         snapshot = document.get()
         if not snapshot.exists:
-            return []
+            return [], None
 
         data = snapshot.to_dict() or {}
         expires_at = data.get("expires_at")
         if isinstance(expires_at, datetime) and expires_at <= self._now():
             document.delete()
-            return []
+            return [], None
 
         history = data.get("history") or []
-        return list(ModelMessagesTypeAdapter.validate_python(history))
+        return list(ModelMessagesTypeAdapter.validate_python(history)), data.get("agent_name")
 
     def save_history(
         self,

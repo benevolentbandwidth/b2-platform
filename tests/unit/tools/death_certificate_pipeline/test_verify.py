@@ -268,11 +268,6 @@ def test_review_reasons_name_the_check_that_errored():
     assert "not fully checked" in detail
 
 
-def test_review_reasons_explain_a_missing_account():
-    (reason,) = _reasons(["NO_CLAIMANT_ACCOUNT"])
-    assert "has not described what happened" in reason
-
-
 
 def test_review_reasons_quote_what_gemini_objected_to():
     """A reviewer needs the claim itself to confirm or dismiss it in seconds,

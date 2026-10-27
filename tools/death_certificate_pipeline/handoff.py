@@ -21,14 +21,16 @@ from tools.fake_image_detector.google_clients import access_token
 
 logger = logging.getLogger(__name__)
 
-_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
-_DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+_STORAGE_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
+_STORAGE_UPLOAD_URL = "https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o"
 
 # Waits between attempts after a temporary failure; one more attempt than
-# there are entries. Drive's documented retryable responses are 429, 5xx and
-# 403 rateLimitExceeded / userRateLimitExceeded.
+# there are entries. Cloud Storage's documented retryable responses are 408,
+# 429 and 5xx.
 _RETRY_DELAYS_SECONDS: tuple[float, ...] = (1.0, 3.0)
-_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+# Returned for a create-only upload whose object name already exists.
+_PRECONDITION_FAILED = 412
 
 
 DECISION_ACCEPTED = "accepted"
@@ -99,39 +101,22 @@ def build_handoff_payload(
     }
 
 
-def _multipart_body(metadata: dict[str, Any], content: bytes, mime_type: str) -> tuple[str, bytes]:
-    # Random per request: a fixed boundary could also occur inside the image
-    # bytes and silently corrupt the body.
-    boundary = f"b2-{secrets.token_hex(16)}"
-    body = (
-        f"--{boundary}\r\n"
-        "Content-Type: application/json; charset=UTF-8\r\n\r\n"
-    ).encode() + json.dumps(metadata).encode("utf-8") + (
-        f"\r\n--{boundary}\r\n"
-        f"Content-Type: {mime_type}\r\n\r\n"
-    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
-    return boundary, body
-
-
 def _get_access_token() -> str:
     from google.auth.exceptions import GoogleAuthError
 
     try:
         # Shared credentials, refreshed only on expiry (see google_clients).
-        token = access_token(_DRIVE_SCOPE)
+        token = access_token(_STORAGE_SCOPE)
     except GoogleAuthError as exc:
-        raise ValueError("Google Drive authentication failed") from exc
+        raise ValueError("Cloud Storage authentication failed") from exc
     if not token:
-        raise ValueError("Google Drive authentication returned no access token")
+        raise ValueError("Cloud Storage authentication returned no access token")
     return token
 
 
 def _retryable(exc: httpx.HTTPError) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
-        response = exc.response
-        if response.status_code in _RETRYABLE_STATUS:
-            return True
-        return response.status_code == 403 and "ratelimitexceeded" in response.text.lower()
+        return exc.response.status_code in _RETRYABLE_STATUS
     return isinstance(exc, httpx.TransportError)
 
 
@@ -144,33 +129,27 @@ def _describe(exc: httpx.HTTPError) -> str:
 async def _upload_file(
     client: httpx.AsyncClient,
     token: str,
-    folder_id: str,
+    bucket: str,
     name: str,
     content: bytes,
     mime_type: str,
 ) -> None:
-    """Upload one file, retrying temporary failures.
+    """Upload one object, retrying temporary failures.
 
-    A retry after a network error can, rarely, duplicate a file whose first
-    attempt did reach Drive. Both copies share the same name, so they are
-    recognisable as one case.
+    Create-only (ifGenerationMatch=0): B2 can add a case to the bucket but
+    never overwrite one. An upload is all-or-nothing, so when a retry finds the
+    name taken, the earlier attempt did land and the file is complete.
     """
-    boundary, body = _multipart_body(
-        {"name": name, "parents": [folder_id], "mimeType": mime_type},
-        content,
-        mime_type,
-    )
     for attempt, delay in enumerate((*_RETRY_DELAYS_SECONDS, None), start=1):
         try:
             response = await client.post(
-                _DRIVE_UPLOAD_URL,
-                params={"uploadType": "multipart", "supportsAllDrives": "true"},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": f"multipart/related; boundary={boundary}",
-                },
-                content=body,
+                _STORAGE_UPLOAD_URL.format(bucket=bucket),
+                params={"uploadType": "media", "name": name, "ifGenerationMatch": "0"},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": mime_type},
+                content=content,
             )
+            if attempt > 1 and response.status_code == _PRECONDITION_FAILED:
+                return
             response.raise_for_status()
             return
         except httpx.HTTPError as exc:
@@ -186,19 +165,23 @@ async def _upload_file(
 async def deliver_to_gl(
     payload: dict[str, Any], image_bytes: bytes, image_mime_type: str
 ) -> bool:
-    """Upload a case to GiveLight's Drive folder: the document, then its JSON.
+    """Upload a case to the GiveLight handoff bucket: the document, then its JSON.
+
+    GiveLight's own Apps Script moves each complete case from the bucket into
+    its private Drive folder (integrations/givelight-drive-automation), so B2
+    never has access to GiveLight's Drive.
 
     The JSON goes last and names its document in `image_file`, so a JSON file
-    in the folder always means a complete case. If the JSON upload fails after
-    the document succeeded, the stray document has no JSON and can be ignored.
-    (Deleting it instead would need more than Contributor access on a Shared
-    Drive.)
+    in the bucket always means a complete case. If the JSON upload fails after
+    the document succeeded, the stray document has no JSON and is ignored; the
+    bucket deletes it after a few days. (B2 can only create objects, not
+    delete them.)
 
     Returns False on every failure and logs a distinct reason for each.
     """
-    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-    if not folder_id:
-        logger.warning("handoff.skipped reason=GOOGLE_DRIVE_FOLDER_ID_unset")
+    bucket = os.getenv("GIVELIGHT_HANDOFF_BUCKET")
+    if not bucket:
+        logger.warning("handoff.skipped reason=GIVELIGHT_HANDOFF_BUCKET_unset")
         return False
 
     try:
@@ -218,19 +201,19 @@ async def deliver_to_gl(
     current = image_name
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            await _upload_file(client, token, folder_id, image_name, image_bytes, upload_mime_type)
+            await _upload_file(client, token, bucket, image_name, image_bytes, upload_mime_type)
             current = json_name
             await _upload_file(
                 client,
                 token,
-                folder_id,
+                bucket,
                 json_name,
                 json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8"),
                 "application/json",
             )
     except httpx.HTTPStatusError as exc:
-        # Drive error bodies describe the request, not the payload, so they are
-        # safe to log; truncated regardless.
+        # Cloud Storage error bodies describe the request, not the payload, so
+        # they are safe to log; truncated regardless.
         logger.error(
             "handoff.failed stage=upload file=%s status=%d detail=%.200s",
             current,
