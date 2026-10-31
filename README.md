@@ -8,6 +8,12 @@ A user in rural Kenya texts a number on WhatsApp. A farmer in Senegal sends a vo
 
 No app to download. No account to create. No data stored. No friction.
 
+> **Status:** b2 is early. What runs today is the WhatsApp channel and its first
+> real use: orphan-aid intake for GiveLight, which verifies death certificates
+> and passes cases to GiveLight's team. Most of this document describes the
+> platform b2 is building towards; [What's Running Today](#whats-running-today)
+> describes what is built.
+
 ---
 
 ## The Problem
@@ -47,12 +53,103 @@ User sends "My maize leaves are turning yellow" on WhatsApp from Kisumu, Kenya
     LLM never sees: user identity, session ID, location, channel, or any
                     signal linking this request to any other request
            ↓
-    Gemini 1.5 Pro responds in Swahili with Kenya-specific farming advice
+    Gemini responds in Swahili with Kenya-specific farming advice
            ↓
 User receives hyperlocal expert advice. Nothing stored. LLM learned nothing.
 When session ends, b2 sends a plain-language summary. User holds their own memory.
 If they reply to that summary later, b2 picks up where it left off.
 ```
+
+---
+
+## What's Running Today
+
+```
+WhatsApp user
+     ↓
+Meta Cloud API → central webhook (whatsapp-webhook, benevolent-bandwidth project)
+     Acknowledges Meta at once, then POSTs each message to b2
+     ↓
+POST /message — b2 WhatsApp adapter (src/api.py, on Cloud Run)
+     ↓
+Router (src/router.py)
+     Picks an agent from agents/*.yaml by embedding similarity
+     (text-embedding-004). A conversation with a sticky agent stays with it.
+     ↓
+Agent (pydantic-ai on Gemini, via Vertex AI) and its tools
+     ↓
+Reply returned to the webhook, which sends it on WhatsApp
+```
+
+### Agents
+
+| Agent | Handles |
+|---|---|
+| `whatsapp_agent` | Greetings, small talk, and general questions about GiveLight and b2. The fallback for anything no other agent covers. |
+| `death_certificate_poc_agent` | Orphan-aid intake for GiveLight. It takes the claimant's account of the death and the death certificate, verifies the certificate, and passes the case to GiveLight. Sticky: once a claim starts here, the rest of the conversation stays here. |
+
+`agents/examples/` holds templates. The router reads only `agents/*.yaml`, so
+they never receive messages.
+
+### Death-certificate verification
+
+When the certificate arrives, the intake agent calls the
+`death_certificate_verification` tool
+(`tools/death_certificate_pipeline/verify.py`). The model never sees the image;
+the tool loads it from the session store and:
+
+1. **Reads the file.** Images and PDFs are accepted. A file that can't be read
+   goes to review.
+2. **Checks authenticity.** The checks in `tools/fake_image_detector` look for
+   forgery and editing. Most of the weight is on a Gemini vision check.
+3. **Checks consistency.** Gemini reads the certificate's details and compares
+   them with what the claimant said. If the claimant hasn't described the
+   death, this check is neutral and doesn't count against them.
+4. **Scores the case from 1 to 100**, using the versioned settings in
+   `tools/death_certificate_pipeline/config/scoring.yaml`. The high and medium
+   bands are accepted. A fraud flag always sends the case to review.
+5. **Hands every case to GiveLight** with a case reference, marked either
+   `accepted` or `needs_review` with the reasons. GiveLight's team does the
+   human review.
+
+Accuracy on the current test set is under
+[Latest results](#latest-results).
+
+### GiveLight handoff
+
+b2 uploads each case (the document and a JSON payload) to a Cloud Storage
+bucket, named by `GIVELIGHT_HANDOFF_BUCKET`. It can only add files there, never
+read or delete them. GiveLight's own Apps Script
+([`integrations/givelight-drive-automation`](integrations/givelight-drive-automation/README.md))
+moves each case into GiveLight's private Drive folder, emails their team, and
+deletes it from the bucket. b2 never has access to GiveLight's Drive. Details:
+[docs/integrations/google-drive-handoff.md](docs/integrations/google-drive-handoff.md).
+
+### State
+
+For each conversation, Firestore holds the message history, the agent handling
+it, and the latest uploaded image. All of it expires 72 hours after the last
+message (`src/session_store.py`).
+
+### Deployment and configuration
+
+Two Cloud Run services run the adapter: `b2-whatsapp-adapter` and
+`b2-whatsapp-adapter-staging`. Both are built by `cloudbuild.yaml`. Their
+environment variables and secrets are listed in
+[docs/cloud-run-config.md](docs/cloud-run-config.md).
+
+### Running it locally
+
+```bash
+pip install -r requirements.txt
+pytest tests/unit               # unit tests
+python -m src.main              # chat with the agents in the terminal
+python scripts/e2e_cases.py     # e2e cases, see End-to-End Test Automation
+```
+
+The agents and the verification checks call Gemini on Vertex AI, so set
+`GOOGLE_CLOUD_PROJECT` and sign in with
+`gcloud auth application-default login` first.
 
 ---
 
@@ -237,7 +334,7 @@ calculator     ← lending-lens · delivery-optimizer · ...
 ┌──────────────────────────────▼───────────────────────────────────┐
 │                        MODEL LAYER                               │
 │         LLMAdapter interface — model-agnostic, swappable         │
-│      Gemini 1.5 Pro (MVP) · GPT-4o · Claude · LLaMA             │
+│           Gemini (MVP) · GPT-4o · Claude · LLaMA                 │
 │   Every model sees: b2 · Every model sees: isolated context      │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -245,6 +342,37 @@ calculator     ← lending-lens · delivery-optimizer · ...
 ---
 
 ## Defining a Skill Agent
+
+An agent is one YAML file in `agents/`. These are the fields the loader reads
+today (`src/orchestrator/agent.py`):
+
+```yaml
+# agents/my_agent.yaml
+
+name: my_agent
+description: >
+  The requests this agent should handle. The router compares each message with
+  the agent's name, description and system prompt, so describe the requests,
+  not the agent.
+
+sticky: false        # true: once a conversation reaches this agent, it stays
+
+system_prompt: |
+  How the agent should behave.
+
+tools:               # names from tools/*.yaml
+  - death_certificate_verification
+skills: []           # names from skills/*.yaml
+
+provider:
+  type: gemini
+  model: gemini-2.5-flash
+```
+
+### Planned format
+
+The target design adds languages, location scope, session settings, persona and
+safety rules. The loader doesn't read these fields yet:
 
 ```yaml
 # agents/farming-kenya/agent.yaml
@@ -292,6 +420,28 @@ owner: contributor:your-github-handle
 
 ## Defining a Tool
 
+A tool is a YAML file in `tools/` that points at a Python function. The model
+sees the name, description and input schema:
+
+```yaml
+# tools/deathCertificatePipeline.yaml
+
+name: death_certificate_verification
+description: >
+  What the tool does and when the model should call it.
+input_schema:
+  type: object
+  properties: {}
+implementation:
+  type: function
+  needs_context: true     # the handler receives the conversation's context
+  handler: tools.death_certificate_pipeline.verify.verify_death_certificate
+```
+
+### Planned format
+
+The target design serves tools over MCP and injects location automatically:
+
 ```yaml
 # tools/weather/tool.yaml
 
@@ -326,7 +476,7 @@ owner: contributor:your-github-handle
 
 ## Language Support
 
-Gemini 1.5 Pro understands and responds natively in 100+ languages. The intent classifier detects language from the message itself — no translation layer, no extra latency, no cost.
+Gemini understands and responds natively in 100+ languages. The intent classifier detects language from the message itself — no translation layer, no extra latency, no cost.
 
 | Region | Languages |
 |--------|-----------|
@@ -336,7 +486,7 @@ Gemini 1.5 Pro understands and responds natively in 100+ languages. The intent c
 | South Asia | Hindi (hi), Bengali (bn), Urdu (ur), Gujarati (gu), Punjabi (pa) |
 | Southeast Asia | Indonesian (id), Filipino (fil), Vietnamese (vi), Khmer (km) |
 | Latin America | Spanish (es), Portuguese (pt), Haitian Creole (ht), Quechua (qu) |
-| + 80 more | All languages natively supported by Gemini 1.5 Pro |
+| + 80 more | All languages natively supported by Gemini |
 
 ---
 
@@ -354,26 +504,45 @@ These are not aspirations. They are architectural constraints enforced in code:
 - **No tracking, no analytics, no behavioral data.** Usage counted anonymously — request counts only.
 - **NeMo Guardrails scrubs PII** — including precise location — from every message before it reaches any LLM or tool.
 
+### Where the current implementation differs
+
+- **Conversations are kept for up to 72 hours, in Firestore, not in memory.**
+  Cloud Run runs several instances, so a WhatsApp conversation has to survive
+  between them. Firestore holds each conversation's history, the agent handling
+  it, and the latest uploaded image. Records are keyed by the user's WhatsApp
+  number and expire 72 hours after the last message.
+- **Death certificates are passed to GiveLight by design.** Each case goes
+  through a staging bucket. It is deleted once GiveLight's script collects it,
+  or after 7 days.
+- **Not built yet:** NeMo Guardrails, the LLM API Gateway, location detection,
+  and the end-of-session summary. Model calls go from the adapter straight to
+  Gemini on Vertex AI, under the adapter's own service account.
+
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Why |
-|-------|-----------|-----|
-| Channels | Meta Cloud API, Twilio, Telegram Bot API | Widest reach, lowest friction |
-| Async pipeline | GCP Pub/Sub | Webhook returns 200 in <1s |
-| Guardrails | NVIDIA NeMo Guardrails | Open source, production-proven |
-| Tool protocol | Model Context Protocol (MCP) | Standard, composable, location-aware |
-| Location detection | Gemini inference + geocoding + phone prefix | Three-source fallback chain |
-| Geocoding | Google Maps Geocoding API | Place names → country/region |
-| LLM API Gateway | b2 custom (single identity, isolation enforcement) | Privacy + contamination prevention |
-| Intent + routing | b2 Agentic OS Core (custom) | Intent × location × language |
-| LLM (MVP) | Gemini 1.5 Pro via Vertex AI | 100+ languages, GCP-native |
-| LLM (adapters) | GPT-4o, Claude, LLaMA | Model-agnostic adapter interface |
-| Knowledge / RAG | Vertex AI Vector Search | Semantic retrieval |
-| Session state | In-memory only, max 72 hrs per skill | Privacy: nothing persists beyond TTL |
-| Compute | GCP Cloud Run | Serverless, scales to zero |
-| Language | Python 3.11 | FastAPI, async-first |
+| Layer | Technology | Status |
+|-------|-----------|--------|
+| Channels | Meta WhatsApp Cloud API | Live |
+| | Twilio (SMS), Telegram Bot API | Planned |
+| Async pipeline | Central webhook acknowledges Meta at once and processes in the background | Live |
+| | GCP Pub/Sub | Planned |
+| Agent framework | pydantic-ai | Live |
+| Intent + routing | Embedding similarity (Vertex AI `text-embedding-004`), sticky agents | Live |
+| | Intent × location × language routing | Planned |
+| LLM | Gemini 3.8 Flash and 2.5 Flash via Vertex AI | Live |
+| | GPT-4o, Claude, LLaMA adapters | Planned |
+| Tools | YAML-defined Python functions | Live |
+| | Model Context Protocol (MCP) | Planned |
+| Session state | Firestore, 72-hour TTL | Live |
+| Partner handoff | Cloud Storage bucket + GiveLight's Apps Script | Live |
+| Compute | GCP Cloud Run, built by Cloud Build | Live |
+| Language | Python 3.12, FastAPI | Live |
+| Guardrails | NVIDIA NeMo Guardrails | Planned |
+| Location detection | Gemini inference + geocoding + phone prefix | Planned |
+| LLM API Gateway | b2 custom (single identity, isolation enforcement) | Planned |
+| Knowledge / RAG | Vertex AI Vector Search | Planned |
 
 ---
 
@@ -418,46 +587,44 @@ Multi-region · 500+ skills · 100+ tools · 1M+ users · Open source core
 
 ```
 b2-platform/
-├── app/
-│   ├── main.py
-│   ├── core/
-│   │   ├── envelope.py            # Canonical message + LocationContext
-│   │   ├── session.py             # Ephemeral session manager
-│   │   ├── safety.py              # NeMo Guardrails integration
-│   │   ├── worker.py              # Pub/Sub async processor
-│   │   └── config.py
-│   ├── intelligence/
-│   │   ├── location.py            # Location detector
-│   │   ├── classifier.py          # Intent + language classifier
-│   │   ├── router.py              # Skill router
-│   │   ├── runtime.py             # Skill agent runtime (prompt builder)
-│   │   ├── gateway.py             # LLM API Gateway (NEW)
-│   │   └── adapters/
-│   │       ├── base.py            # LLMAdapter interface
-│   │       ├── gemini.py          # Gemini 1.5 Pro (MVP)
-│   │       ├── gpt4o.py           # Phase 1
-│   │       └── claude.py          # Phase 1
-│   ├── registries/
-│   │   ├── agent_registry.py
-│   │   ├── tool_registry.py
-│   │   └── location_registry.py
-│   └── channels/
-│       ├── base.py
-│       ├── whatsapp/
-│       ├── sms/
-│       └── telegram/
+├── src/
+│   ├── api.py                     # FastAPI app: POST /message, GET /health
+│   ├── chat.py                    # One conversation turn: route, run, save
+│   ├── router.py                  # Picks the agent for a message
+│   ├── embeddings.py              # Vertex AI embeddings for routing
+│   ├── store.py                   # SQLite index of agent embeddings
+│   ├── session_store.py           # Firestore history + latest image, 72-hour TTL
+│   ├── orchestrator/              # Agent, tool and skill loading
+│   ├── whatsapp_media.py          # Downloads inbound media from Meta
+│   ├── whatsapp_outbound.py       # Sends extra WhatsApp messages
+│   ├── summary_response.py        # Optional summary message after a verification
+│   ├── envelope.py                # Canonical message types
+│   ├── config/whatsapp.yaml       # WhatsApp channel settings
+│   └── main.py                    # Terminal chat for local testing
 ├── agents/
-│   ├── farming-global/
-│   └── farming-kenya/
+│   ├── whatsapp_agent.yaml
+│   ├── poc_deathCertParserAgent.yaml
+│   └── examples/                  # Templates, not routed
 ├── tools/
-│   ├── rag/
-│   └── web_search/
+│   ├── deathCertificatePipeline.yaml
+│   ├── death_certificate_pipeline/  # Verification, scoring and GiveLight handoff
+│   ├── fake_image_detector/         # Authenticity checks
+│   ├── privacy/                     # PII scrubber
+│   └── summary/
+├── skills/                        # Prompt snippets agents can include
+├── integrations/
+│   └── givelight-drive-automation/  # GiveLight's Apps Script
+├── e2e/                           # e2e harness
+├── e2e_cases/                     # e2e cases (real cases are not checked in)
+├── scripts/                       # e2e runner, Cloud Run config check
+├── poc/                           # Earlier standalone scoring API
+├── app/core/                      # Re-exports kept for older imports
 ├── tests/
-│   └── scripts/
+├── docs/
+├── deploy/cloud_run_config.json   # Required Cloud Run env and secrets
+├── cloudbuild.yaml
 ├── Dockerfile
-├── requirements.txt
-├── CONTRIBUTING.md
-└── README.md
+└── requirements.txt
 ```
 
 ---
@@ -548,6 +715,50 @@ service. Remote media cases also need a pre-existing Meta media ID in each
 case's `expected.json`; local certificate files are not uploaded in remote mode.
 
 Do not commit real certificates or real-person narratives as e2e fixtures.
+
+### Latest results
+
+Run on 2026-10-31, locally with `--debug-tools`, on the code in
+[#60](https://github.com/benevolentbandwidth/b2-platform/pull/60) (scoring
+config v8, detector config v9, Gemini 3.8 Flash). The case set itself is not
+checked in.
+
+| Group | Correct | |
+|---|---|---|
+| Indonesia real | 7 / 7 | accepted |
+| Bangladesh real | 7 / 8 | accepted |
+| Pakistan real | 6 / 8 | accepted |
+| Indonesia fake | 29 / 29 | caught |
+| Bangladesh fake | 8 / 8 | caught |
+| Pakistan fake | 8 / 8 | caught |
+| Moroccan fake | 4 / 9 | caught |
+| **Real** | **20 / 23 (87%)** | accepted |
+| **Fake** | **49 / 54 (91%)** | caught |
+| **Overall** | **69 / 77 (90%)** | |
+
+How to read these numbers:
+
+- **The fakes vary a lot in difficulty.** The Pakistan fakes are synthetic and
+  print "SYNTHETIC TEST DATA — NOT A VALID CERTIFICATE" on the page, so they
+  measure little; without them, 41 of 46 fakes (89%) were caught. The
+  Indonesian fakes combine headers and stamps from different villages. The
+  Bangladesh fakes are real certificates with the handwriting replaced by
+  typed text.
+- **Realistic edits are the weak spot.** The Moroccan fakes are one real scan
+  with only the handwritten fields changed. Five of the nine (002, 005, 006,
+  009, 010) were accepted, rated clean at a fraud risk of 0.10–0.15, as in
+  every earlier run.
+- **Real certificates sent to review:** Pakistan 002 and 006, flagged as forged
+  over handwritten annotations on every run so far, and Bangladesh 001, which
+  passed on the previous run (the fraud check varies between runs).
+- A case counts as caught when it is not accepted, whether it is sent to review
+  or rejected.
+
+Each group was run with:
+
+```bash
+python scripts/e2e_cases.py --debug-tools --country <country> --kind <real|fake>
+```
 
 ---
 
