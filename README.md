@@ -8,7 +8,7 @@
 
 | Agent | What it does | Status |
 |---|---|---|
-| **GiveLight intake** | Families apply to GiveLight for orphan aid over WhatsApp. The agent takes their account, verifies the death certificate, and hands GiveLight's reviewers a ready-to-review case. | Running: our first agent |
+| **GiveLight intake** | Families apply to GiveLight for orphan aid over WhatsApp. The agent takes their account, verifies the death certificate, and hands GiveLight's reviewers a ready-to-review case. | Running: our first agent, built for GiveLight only |
 | **Volunteer management** | Helps nonprofits recruit, coordinate and keep in touch with their volunteers. | Next |
 
 ### Where we're going
@@ -25,9 +25,10 @@ b2 brings the parts every nonprofit would otherwise have to build alone:
 - **Orchestration.** One number, many agents. A router hands each
   conversation to the agent built for it, and the agents call the tools they
   need.
-- **Pretrained agents.** Ready-made agents for common nonprofit work, such as
-  intake and volunteer management, that a nonprofit can adapt instead of
-  building from scratch.
+- **Pretrained agents.** Ready-made agents for work many nonprofits share,
+  starting with volunteer management, that a nonprofit can adapt instead of
+  building from scratch. Agents can also be built for one organization's own
+  process, as GiveLight intake is.
 - **Channels people already use.** WhatsApp first. No app to download and no
   account to create.
 
@@ -60,13 +61,13 @@ b2 is built for these.
 
 ## How It Works
 
-The full design, using a nonprofit's intake agent as the example. Parts of
-this are built and parts are planned; [What's Running Today](#whats-running-today)
-says which.
+The full design, using the planned volunteer management agent as the example.
+Parts of this are built and parts are planned;
+[What's Running Today](#whats-running-today) says which.
 
 ```
-A family messages a nonprofit on WhatsApp, in Indonesian:
-"My brother has died and I'm caring for his children. Can you help?"
+A volunteer messages a nonprofit on WhatsApp, in Spanish:
+"Can I help at the food bank this Saturday morning?"
            ↓
     Channel Adapter (WhatsApp)
     Normalizes to a canonical message envelope
@@ -74,20 +75,20 @@ A family messages a nonprofit on WhatsApp, in Indonesian:
     b2 Core
     ├── Guardrails             (safety · PII scrub · prompt-injection defense)
     ├── Router                 (picks the agent built for this request)
-    ├── Agent Registry         (resolves: the nonprofit's intake agent)
-    ├── Tool Registry          (resolves: document_verification, partner_handoff)
+    ├── Agent Registry         (resolves: the volunteer management agent)
+    ├── Tool Registry          (resolves: scheduling, rag:volunteer-handbook)
     ├── Agent Runtime          (builds a self-contained, isolated prompt)
     └── LLM Gateway            (any LLM · b2 identity · no beneficiary signal)
            ↓
     The model sees only the agent's instructions and this conversation.
-    It never sees who the family is or any other conversation.
+    It never sees who the volunteer is or any other conversation.
            ↓
-    The agent asks for the documents it needs, checks them with its tools,
-    and replies in Indonesian
+    The agent finds open Saturday shifts, books one, and replies in
+    Spanish with the time, address and what to bring
            ↓
-Anything that needs judgment goes to the nonprofit's own staff, with the
-reasons. The family gets a summary and a case reference. Conversations
-expire; nothing is kept that the work doesn't need.
+Anything that needs judgment, such as a safeguarding concern, goes to the
+nonprofit's own staff. The volunteer gets a summary of their shifts.
+Conversations expire; nothing is kept that the work doesn't need.
 ```
 
 ---
@@ -206,18 +207,18 @@ This solves two problems.
 
 Without a gateway, model providers can in principle link requests to people
 through IP addresses, API keys or usage patterns. With the gateway, all
-requests come from a single b2 service identity. Two families applying for aid
-are indistinguishable to the model provider: both are b2.
+requests come from a single b2 service identity. Two people messaging a
+nonprofit are indistinguishable to the model provider: both are b2.
 
 ```
 WITHOUT b2 gateway:
-  Family A → [IP, session token A] → model provider
-  Family B → [IP, session token B] → model provider
+  Person A → [IP, session token A] → model provider
+  Person B → [IP, session token B] → model provider
   The provider can potentially correlate A and B
 
 WITH b2 gateway:
-  Family A → b2 LLM Gateway → [b2 identity only] → any model
-  Family B → b2 LLM Gateway → [b2 identity only] → any model
+  Person A → b2 LLM Gateway → [b2 identity only] → any model
+  Person B → b2 LLM Gateway → [b2 identity only] → any model
   The provider sees only: b2, b2. No correlation possible.
 ```
 
@@ -227,10 +228,10 @@ LLMs are stateless between API calls — they have no memory. But if prompt cons
 
 ```
 BAD — implicit shared context:
-  Prompt: "Continue helping the applicant with their case."
-  History: [turns from family A about their certificate]
-  Family B's message: "What documents do you need?"
-  Result: the model answers using family A's case — wrong for family B
+  Prompt: "Continue helping the volunteer with their shifts."
+  History: [turns from volunteer A about their Saturday shift]
+  Volunteer B's message: "When am I working next?"
+  Result: the model answers with volunteer A's shift — wrong for volunteer B
 
 GOOD — explicit isolated context (b2's approach):
   Every prompt is fully self-contained.
@@ -305,10 +306,12 @@ pieces: a WhatsApp integration, routing, guardrails, document checks, a way to
 hand work to staff. b2 builds them once and shares them.
 
 ### Pretrained agents
-Agents for common nonprofit work, built once and adapted per organization:
-intake and eligibility checks, volunteer management, and more over time. A
-nonprofit starts from a working agent and changes its instructions, tools and
-model in YAML.
+Agents for work many nonprofits share, built once and adapted per
+organization, starting with volunteer management. A nonprofit starts from a
+working agent and changes its instructions, tools and model in YAML. Some
+agents are built for one organization's process instead: GiveLight intake is
+GiveLight's alone, and its death-certificate checks and handoff are specific to
+GiveLight.
 
 ### Orchestration
 One number, many agents. The router matches each conversation to the agent
@@ -335,18 +338,16 @@ target interface is [MCP](https://modelcontextprotocol.io).
 ```
 TOOL REGISTRY — built once, reused by every agent
 ────────────────────────────────────────────────────────
-document_verification ← aid intake · eligibility checks · ...
 pii_scrub             ← every agent
 summary               ← every agent (plain-language recap for the person)
-partner_handoff       ← intake · casework · ...
 scheduling            ← volunteer management · appointments · ...
 rag                   ← every agent with a knowledge base
 [your tool]           ← immediately available to every future agent
 ```
 
-`document_verification` (the death-certificate pipeline), `pii_scrub`,
-`summary` and `partner_handoff` (the GiveLight bucket handoff) exist today in
-`tools/`; the others are planned.
+`pii_scrub` and `summary` exist today in `tools/`; the others are planned. A
+tool can also belong to one organization's agent: the death-certificate
+verification and GiveLight handoff tools serve only GiveLight intake.
 
 ---
 
@@ -550,8 +551,8 @@ owner: contributor:your-github-handle
 
 The people nonprofits serve write in their own languages, and their documents
 come in many more. Agents reply in the language a person writes in, and
-document checks read certificates in Indonesian, Bengali, Urdu and other
-languages directly — no translation layer. Gemini, the model used today,
+GiveLight's certificate checks read certificates in Indonesian, Bengali, Urdu
+and other languages directly — no translation layer. Gemini, the model used today,
 supports 100+ languages:
 
 | Region | Languages |
@@ -670,8 +671,8 @@ to, and the target for every agent:
 - [ ] End-of-session summaries for every agent
 
 ### Later
-- [ ] A library of pretrained nonprofit agents (intake and eligibility,
-      volunteer management, case follow-up, FAQs) that organizations adapt
+- [ ] A library of pretrained agents for work many nonprofits share (volunteer
+      management, FAQs, appointment reminders) that organizations adapt
       instead of building
 - [ ] More channels: SMS, Telegram, voice
 - [ ] Tools over MCP, shared across agents and organizations
