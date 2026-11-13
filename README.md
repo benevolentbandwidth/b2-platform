@@ -1,16 +1,38 @@
-# b2 — Shopify for AI Agents for Good
+# b2 — AI Agents for Nonprofits
 
-> One identity. Every skill. Every tool. Every channel. Every language. Every location. Zero data stored.
+> Agents that take on a nonprofit's day-to-day work, on any LLM, with the guardrails and human oversight the people they serve deserve.
 
-**b2** is an open-source Agentic OS Core Platform built by the [Benevolent Bandwidth Foundation](https://benevolentbandwidth.org). It distributes the power of agentic AI to underserved communities worldwide — through the channels they already use, on the devices they already own, in the languages they already speak, with knowledge of where they actually are.
+**b2** is an open-source platform from the [Benevolent Bandwidth Foundation](https://benevolentbandwidth.org) for building and running AI agents for nonprofits. Nonprofits do vital work with small teams, and much of their time goes to work an agent can share: taking in requests, checking documents, answering the same questions, coordinating people. b2 gives them agents that do this work where the people they serve already are, such as WhatsApp, in their own languages, and hands every decision that needs judgment to a person.
 
-A user in rural Kenya texts a number on WhatsApp. A farmer in Senegal sends a voice note. A mother in rural Indonesia sends an SMS from a basic phone. They all reach **@b2** — one identity — and get a genuinely useful, expert answer tailored to their language, their location, and their context, in under two seconds, from a narrow AI skill built by a contributor anywhere in the world.
+### Our agents
 
-No app to download. No account to create. No data stored. No friction.
+| Agent | What it does | Status |
+|---|---|---|
+| **GiveLight intake** | Families apply to GiveLight for orphan aid over WhatsApp. The agent takes their account, verifies the death certificate, and hands GiveLight's reviewers a ready-to-review case. | Running: our first agent |
+| **Volunteer management** | Helps nonprofits recruit, coordinate and keep in touch with their volunteers. | Next |
+
+### Where we're going
+
+Any nonprofit should be able to pick up an agent for its work and trust it.
+b2 brings the parts every nonprofit would otherwise have to build alone:
+
+- **Any LLM.** Agents aren't tied to one model provider. Each agent names its
+  model, so a nonprofit can choose the one that fits its cost, privacy and
+  language needs.
+- **Guardrails.** Personal data is kept out of model prompts, conversations
+  expire, and anything uncertain goes to a person instead of being decided by
+  the model.
+- **Orchestration.** One number, many agents. A router hands each
+  conversation to the agent built for it, and the agents call the tools they
+  need.
+- **Pretrained agents.** Ready-made agents for common nonprofit work, such as
+  intake and volunteer management, that a nonprofit can adapt instead of
+  building from scratch.
+- **Channels people already use.** WhatsApp first. No app to download and no
+  account to create.
 
 > **Status:** b2 is early. What runs today is the WhatsApp channel and its first
-> real use: orphan-aid intake for GiveLight, which verifies death certificates
-> and passes cases to GiveLight's team. Most of this document describes the
+> agent, GiveLight intake, on Gemini. Much of this document describes the
 > platform b2 is building towards; [What's Running Today](#whats-running-today)
 > describes what is built.
 
@@ -18,15 +40,21 @@ No app to download. No account to create. No data stored. No friction.
 
 ## The Problem
 
-AI has enormous potential to help the people who need it most — smallholder farmers, patients without healthcare access, workers navigating complex legal systems, students without teachers. But the delivery mechanisms are wrong:
+Nonprofits could gain a great deal from AI agents, but today's tools aren't
+built for them:
 
-- **App-based AI requires** a smartphone, a data plan, an app download, an account, and digital literacy most users don't have
-- **Per-skill bots require** users to know which bot to contact for which problem — a discovery burden that kills adoption
-- **Generic AI gives generic answers** — advice that ignores where a user actually is, which crops grow in their soil, which laws apply in their country, which clinics are nearby
-- **Direct LLM access exposes users** — most platforms pass user identity directly to model providers, creating trackable profiles
-- **Data-hungry systems** exploit the communities they claim to help
+- **Small teams carry manual work.** Staff spend their time on intake, document
+  checks and coordination instead of on the people they serve.
+- **The people they serve aren't on portals.** They're on WhatsApp, on basic
+  phones, writing in many languages.
+- **Generic AI doesn't know the work.** A general chatbot doesn't know a
+  nonprofit's process, and shouldn't be trusted to make decisions about people
+  on its own.
+- **Sensitive data, tight budgets.** Beneficiaries share IDs, certificates and
+  family details. Nonprofits need privacy and oversight they can explain, and
+  can't afford to be locked into one vendor.
 
-b2 solves all five.
+b2 is built for these.
 
 ---
 
